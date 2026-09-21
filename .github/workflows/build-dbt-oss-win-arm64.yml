@@ -13,19 +13,50 @@ permissions:
   id-token: write
   attestations: write
 
+env:
+  UPSTREAM_PREDICATE: https://patrickryankenneth.github.io/attestations/upstream-source/v1
+
 jobs:
   build:
     runs-on: windows-11-arm
     timeout-minutes: 360
     env:
       RUSTFLAGS: "--cap-lints=warn"
+    outputs:
+      upstream_sha: ${{ steps.upstream.outputs.sha }}
     steps:
-      - name: Checkout dbt-oss at tag
+      - name: Resolve upstream tag to commit
+        id: upstream
+        shell: pwsh
+        env:
+          TAG: ${{ github.event.inputs.dbt_oss_tag }}
+        run: |
+          $url = "https://github.com/dbt-labs/dbt-oss.git"
+          $tag = $env:TAG
+          # Annotated tags need the peeled (^{}) ref to get the commit SHA.
+          $line = git ls-remote $url "refs/tags/${tag}^{}"
+          if (-not $line) { $line = git ls-remote $url "refs/tags/${tag}" }
+          if (-not $line) { throw "Tag $tag not found in $url" }
+          $sha = ($line | Select-Object -First 1).Split("`t")[0]
+          echo "Tag $tag resolves to $sha"
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+
+      - name: Checkout dbt-oss at resolved commit
         uses: actions/checkout@v4
         with:
           repository: dbt-labs/dbt-oss
-          ref: ${{ github.event.inputs.dbt_oss_tag }}
+          ref: ${{ steps.upstream.outputs.sha }}
           path: dbt-oss
+
+      - name: Verify checkout is exact and unmodified
+        shell: pwsh
+        env:
+          SHA: ${{ steps.upstream.outputs.sha }}
+        run: |
+          $head = git -C dbt-oss rev-parse HEAD
+          if ($head -ne $env:SHA) { throw "HEAD $head != expected $env:SHA" }
+          if (git -C dbt-oss status --porcelain) { throw "Working tree is not clean" }
+          echo "Checkout verified: $head"
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -81,21 +112,89 @@ jobs:
 
       - name: Show built wheel(s)
         shell: pwsh
-        run: Get-ChildItem dbt-oss\target\wheels\
+        run: Get-ChildItem -Path dbt-oss -Recurse -Filter "*.whl"
+
+      - name: Confirm build did not modify tracked sources, write upstream record
+        shell: pwsh
+        env:
+          SHA: ${{ steps.upstream.outputs.sha }}
+          TAG: ${{ github.event.inputs.dbt_oss_tag }}
+        run: |
+          git -C dbt-oss diff --quiet HEAD
+          if ($LASTEXITCODE -ne 0) { throw "Build modified tracked source files" }
+          $head = git -C dbt-oss rev-parse HEAD
+          if ($head -ne $env:SHA) { throw "HEAD $head != expected $env:SHA" }
+          @{
+            upstream_repo   = "https://github.com/dbt-labs/dbt-oss"
+            upstream_tag    = $env:TAG
+            upstream_commit = $head
+            tree_clean      = $true
+          } | ConvertTo-Json | Set-Content -Path upstream-source.json
+          Get-Content upstream-source.json
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
           name: dbt-oss-win-arm64-wheel
-          path: dbt-oss/target/wheels/*.whl
+          path: dbt-oss/**/target/wheels/*.whl
           if-no-files-found: error
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v3
         with:
-          subject-path: dbt-oss/target/wheels/*.whl
+          subject-path: dbt-oss/**/target/wheels/*.whl
+
+      - name: Attest upstream source
+        uses: actions/attest@v4
+        with:
+          subject-path: dbt-oss/**/target/wheels/*.whl
+          predicate-type: ${{ env.UPSTREAM_PREDICATE }}
+          predicate-path: upstream-source.json
 
       - name: sccache stats
         if: always()
         shell: pwsh
         run: sccache --show-stats
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      attestations: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.inputs.dbt_oss_tag }}
+      SHA: ${{ needs.build.outputs.upstream_sha }}
+    steps:
+      - name: Download wheel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dbt-oss-win-arm64-wheel
+
+      - name: Verify attestations, then save bundles
+        run: |
+          for f in *.whl; do
+            gh attestation verify "$f" --repo "$GITHUB_REPOSITORY"
+            gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" \
+              --predicate-type "$UPSTREAM_PREDICATE"
+            gh attestation download "$f" --repo "$GITHUB_REPOSITORY"
+            
+            # Robust file matching for sha256 colon or dash separators
+            att_file=$(ls sha256* 2>/dev/null | head -n 1)
+            if [ -n "$att_file" ]; then
+              mv "$att_file" "$f.attestations.jsonl"
+            fi
+          done
+          ls -la
+
+      - name: Create or update GitHub Release
+        run: |
+          REL="dbt-oss-${TAG}"
+          if ! gh release view "$REL" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$REL" --repo "$GITHUB_REPOSITORY" \
+              --title "dbt-oss ${TAG}" \
+              --notes "Built from dbt-labs/dbt-oss@${SHA} (tag ${TAG}), unmodified. Verify with: gh attestation verify <wheel> --repo ${GITHUB_REPOSITORY}"
+          fi
+          gh release upload "$REL" --repo "$GITHUB_REPOSITORY" --clobber \
+            *.whl *.attestations.jsonl
