@@ -45,18 +45,25 @@ jobs:
       - name: Expose GHA cache env vars for sccache
         uses: crazy-max/ghaction-github-runtime@v3
 
-      - name: Enable sccache (fallback to no-cache if backend is unhealthy)
+      - name: Start sccache and set wrapper
         shell: pwsh
         run: |
+          $env:SCCACHE_GHA_ENABLED = "true"
           & sccache --start-server
-          if ($LASTEXITCODE -eq 0) {
-            echo "SCCACHE_GHA_ENABLED=true" >> $env:GITHUB_ENV
-            echo "RUSTC_WRAPPER=sccache" >> $env:GITHUB_ENV
-          } else {
+          if ($LASTEXITCODE -ne 0) {
             Write-Warning "sccache backend unhealthy - continuing without cache"
             & sccache --stop-server 2>$null
             $global:LASTEXITCODE = 0
+          } else {
+            echo "SCCACHE_GHA_ENABLED=true" >> $env:GITHUB_ENV
+            echo "RUSTC_WRAPPER=sccache" >> $env:GITHUB_ENV
           }
+
+      - name: Confirm wrapper and GHA mode are active
+        shell: pwsh
+        run: |
+          echo "RUSTC_WRAPPER=$env:RUSTC_WRAPPER"
+          echo "SCCACHE_GHA_ENABLED=$env:SCCACHE_GHA_ENABLED"
 
       - name: Install maturin
         shell: pwsh
@@ -79,6 +86,6 @@ jobs:
           if-no-files-found: error
 
       - name: sccache stats
-        if: env.RUSTC_WRAPPER == 'sccache'
+        if: always()
         shell: pwsh
         run: sccache --show-stats
