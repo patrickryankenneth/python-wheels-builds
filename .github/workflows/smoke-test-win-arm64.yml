@@ -21,22 +21,29 @@ jobs:
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
-      # sccache: GitHub-Actions-native compile cache. No S3/credentials needed -
-      # it stores compiled object cache in GitHub's own Actions cache backend
-      # (same storage actions/cache uses), keyed automatically by toolchain +
-      # source hash. Free, ~10GB/repo, evicted after 7 days unused.
       - name: Install sccache
         uses: mozilla-actions/sccache-action@v0.0.6
 
-      - name: Set sccache env vars
+      # Resilience: sccache's GHA cache backend can have transient outages
+      # (seen: "Our services aren't available right now" / HTTP 400 from
+      # artifactcache.actions.githubusercontent.com). By default sccache fails
+      # HARD on this - it kills every single rustc invocation, not just cache
+      # misses. So: probe it first. If the cache backend is unhappy, fall back
+      # to building with NO cache rather than failing the whole job. A slow
+      # build beats a broken one.
+      - name: Enable sccache (with fallback if cache backend is unhealthy)
         shell: pwsh
         run: |
-          echo "RUSTC_WRAPPER=sccache" >> $env:GITHUB_ENV
-          echo "SCCACHE_GHA_ENABLED=true" >> $env:GITHUB_ENV
-          # Optional but worth it for iterative dev: incremental compilation.
-          # Skip this for final release wheel builds - incremental adds overhead
-          # to a from-scratch CI build and produces slightly larger artifacts.
-          # echo "CARGO_INCREMENTAL=1" >> $env:GITHUB_ENV
+          $env:SCCACHE_GHA_ENABLED = "true"
+          & sccache --start-server
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "sccache server started OK - enabling cache"
+            echo "SCCACHE_GHA_ENABLED=true" >> $env:GITHUB_ENV
+            echo "RUSTC_WRAPPER=sccache" >> $env:GITHUB_ENV
+          } else {
+            Write-Warning "sccache server failed to start (cache backend likely down) - continuing WITHOUT cache for this run"
+            & sccache --stop-server 2>$null
+          }
 
       - name: Rust toolchain info
         shell: pwsh
@@ -50,7 +57,6 @@ jobs:
           python --version
           python -c "import platform; print(platform.machine(), platform.architecture())"
 
-      # rlib probe (proves basic compiler/linker toolchain works)
       - name: Probe rlib build
         shell: pwsh
         run: |
@@ -59,8 +65,6 @@ jobs:
           cargo build --release
           Get-ChildItem target\release
 
-      # cdylib probe (proves the ACTUAL artifact type a Python wheel needs -
-      # this is what exercises link.exe / the MSVC linker for real, unlike rlib)
       - name: Probe cdylib build
         shell: pwsh
         run: |
@@ -70,6 +74,7 @@ jobs:
           cargo build --release
           Get-ChildItem target\release
 
-      - name: sccache stats
+      - name: sccache stats (if it was enabled)
+        if: env.RUSTC_WRAPPER == 'sccache'
         shell: pwsh
         run: sccache --show-stats
