@@ -12,6 +12,8 @@ jobs:
   build:
     runs-on: windows-11-arm
     timeout-minutes: 360
+    env:
+      RUSTFLAGS: "--cap-lints=warn"
     steps:
       - name: Checkout dbt-oss at tag
         uses: actions/checkout@v4
