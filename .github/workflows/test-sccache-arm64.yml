@@ -26,19 +26,24 @@ jobs:
             exit 1
           }
           echo "RUSTC_WRAPPER=sccache" >> $env:GITHUB_ENV
+          echo "SCCACHE_GHA_ENABLED=true" >> $env:GITHUB_ENV
 
-      - name: Confirm RUSTC_WRAPPER is active
+      - name: Confirm wrapper and GHA mode are active
         shell: pwsh
         run: |
           echo "RUSTC_WRAPPER=$env:RUSTC_WRAPPER"
-          if (-not $env:RUSTC_WRAPPER) {
-            Write-Error "sccache wrapper not set - aborting"
+          echo "SCCACHE_GHA_ENABLED=$env:SCCACHE_GHA_ENABLED"
+          if (-not $env:RUSTC_WRAPPER -or -not $env:SCCACHE_GHA_ENABLED) {
+            Write-Error "sccache not fully configured - aborting"
             exit 1
           }
 
-      - name: Create throwaway test crate
+      - name: Create throwaway test crate with a real dependency
         shell: pwsh
-        run: cargo new sccache-probe --bin
+        run: |
+          cargo new sccache-probe --bin
+          cd sccache-probe
+          cargo add serde --features derive
 
       - name: Build throwaway crate (release)
         working-directory: sccache-probe
