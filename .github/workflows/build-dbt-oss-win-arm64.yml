@@ -1,0 +1,66 @@
+name: build-dbt-oss-win-arm64
+
+on:
+  workflow_dispatch:
+    inputs:
+      dbt_oss_tag:
+        description: 'Git tag in dbt-labs/dbt-oss to build (e.g. v2.0.5)'
+        required: true
+        default: 'v2.0.5'
+
+jobs:
+  build:
+    runs-on: windows-11-arm
+    steps:
+      - name: Checkout dbt-oss at tag
+        uses: actions/checkout@v4
+        with:
+          repository: dbt-labs/dbt-oss
+          ref: ${{ github.event.inputs.dbt_oss_tag }}
+          path: dbt-oss
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          working-directory: dbt-oss
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Enable sccache (fallback to no-cache if backend is unhealthy)
+        shell: pwsh
+        run: |
+          & sccache --start-server
+          if ($LASTEXITCODE -eq 0) {
+            echo "SCCACHE_GHA_ENABLED=true" >> $env:GITHUB_ENV
+            echo "RUSTC_WRAPPER=sccache" >> $env:GITHUB_ENV
+          } else {
+            Write-Warning "sccache backend unhealthy - continuing without cache"
+            & sccache --stop-server 2>$null
+            $global:LASTEXITCODE = 0
+          }
+
+      - name: Install maturin
+        shell: pwsh
+        run: pip install maturin
+
+      - name: Build wheel natively for win_arm64
+        working-directory: dbt-oss
+        shell: pwsh
+        run: maturin build --release
+
+      - name: Show built wheel(s)
+        shell: pwsh
+        run: Get-ChildItem dbt-oss\target\wheels\
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbt-oss-win-arm64-wheel
+          path: dbt-oss/target/wheels/*.whl
+          if-no-files-found: error
+
+      - name: sccache stats
+        if: env.RUSTC_WRAPPER == 'sccache'
+        shell: pwsh
+        run: sccache --show-stats
