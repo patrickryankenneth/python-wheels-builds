@@ -1,0 +1,50 @@
+name: test-sccache-arm64
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-11-arm
+    timeout-minutes: 15
+    steps:
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Expose GHA cache env vars for sccache
+        uses: crazy-max/ghaction-github-runtime@v3
+
+      - name: Start sccache and set wrapper
+        shell: pwsh
+        run: |
+          & sccache --start-server
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "sccache server failed to start"
+            exit 1
+          }
+          echo "RUSTC_WRAPPER=sccache" >> $env:GITHUB_ENV
+
+      - name: Confirm RUSTC_WRAPPER is active
+        shell: pwsh
+        run: |
+          echo "RUSTC_WRAPPER=$env:RUSTC_WRAPPER"
+          if (-not $env:RUSTC_WRAPPER) {
+            Write-Error "sccache wrapper not set - aborting"
+            exit 1
+          }
+
+      - name: Create throwaway test crate
+        shell: pwsh
+        run: cargo new sccache-probe --bin
+
+      - name: Build throwaway crate (release)
+        working-directory: sccache-probe
+        shell: pwsh
+        run: cargo build --release
+
+      - name: Show sccache stats after build
+        shell: pwsh
+        run: sccache --show-stats
