@@ -27,6 +27,18 @@ jobs:
         with:
           cache-workspaces: "dbt-oss -> target"
 
+      - name: Install protoc (x86_64, runs via emulation on arm64)
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "29.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify and export PROTOC
+        shell: pwsh
+        run: |
+          protoc --version
+          echo "PROTOC=$(Get-Command protoc).Source" >> $env:GITHUB_ENV
+
       - name: Install sccache
         uses: mozilla-actions/sccache-action@v0.0.6
 
