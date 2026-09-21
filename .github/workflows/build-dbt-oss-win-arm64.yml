@@ -27,20 +27,23 @@ jobs:
         with:
           cache-workspaces: "dbt-oss -> target"
 
-      - name: Install protoc (x86_64, runs via emulation on arm64)
-        uses: arduino/setup-protoc@v3
-        with:
-          version: "29.3"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Verify and export PROTOC
+      - name: Install protoc manually (x86_64 binary runs via emulation)
         shell: pwsh
         run: |
-          protoc --version
-          echo "PROTOC=$(Get-Command protoc).Source" >> $env:GITHUB_ENV
+          $url = "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-win64.zip"
+          Invoke-WebRequest -Uri $url -OutFile protoc.zip
+          Expand-Archive -Path protoc.zip -DestinationPath $env:RUNNER_TEMP\protoc -Force
+          echo "$env:RUNNER_TEMP\protoc\bin" >> $env:GITHUB_PATH
+
+      - name: Verify protoc is on PATH
+        shell: pwsh
+        run: protoc --version
 
       - name: Install sccache
         uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Expose GHA cache env vars for sccache
+        uses: crazy-max/ghaction-github-runtime@v3
 
       - name: Enable sccache (fallback to no-cache if backend is unhealthy)
         shell: pwsh
