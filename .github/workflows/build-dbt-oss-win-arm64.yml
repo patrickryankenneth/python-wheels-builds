@@ -11,6 +11,7 @@ on:
 jobs:
   build:
     runs-on: windows-11-arm
+    timeout-minutes: 360
     steps:
       - name: Checkout dbt-oss at tag
         uses: actions/checkout@v4
