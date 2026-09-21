@@ -20,6 +20,7 @@ jobs:
       - name: Start sccache and set wrapper
         shell: pwsh
         run: |
+          $env:SCCACHE_GHA_ENABLED = "true"
           & sccache --start-server
           if ($LASTEXITCODE -ne 0) {
             Write-Error "sccache server failed to start"
