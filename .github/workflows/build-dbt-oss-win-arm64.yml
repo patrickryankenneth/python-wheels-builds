@@ -8,6 +8,11 @@ on:
         required: true
         default: 'v2.0.5'
 
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
 jobs:
   build:
     runs-on: windows-11-arm
@@ -84,6 +89,11 @@ jobs:
           name: dbt-oss-win-arm64-wheel
           path: dbt-oss/target/wheels/*.whl
           if-no-files-found: error
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: dbt-oss/target/wheels/*.whl
 
       - name: sccache stats
         if: always()
