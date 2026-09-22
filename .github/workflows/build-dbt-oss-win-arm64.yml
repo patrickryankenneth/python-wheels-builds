@@ -105,43 +105,14 @@ jobs:
         shell: pwsh
         run: pip install maturin
 
-      - name: Build wheel (dbt-core)
+      - name: Build wheel natively for win_arm64
         working-directory: dbt-oss/crates/dbt-sa-python
         shell: pwsh
         run: maturin build --release
-
-      # dbt-oss is upstream's own documented rebrand of dbt-core (identical
-      # compiled extension, only [project].name differs) — see release-v2.yml's
-      # "Rename pyproject for oss wheel" step. Reproducing it here so both
-      # PyPI-style names resolve against this index while the community
-      # transitions off dbt-core.
-      - name: Rename pyproject for oss wheel
-        working-directory: dbt-oss/crates/dbt-sa-python
-        shell: pwsh
-        run: |
-          (Get-Content pyproject.toml) -replace '^name = "dbt-core"$', 'name = "dbt-oss"' |
-            Set-Content pyproject.toml
-          $line = Select-String -Path pyproject.toml -Pattern '^name = "dbt-oss"$'
-          if (-not $line) { throw "rename did not land" }
-
-      - name: Build wheel (dbt-oss)
-        working-directory: dbt-oss/crates/dbt-sa-python
-        shell: pwsh
-        run: maturin build --release
-
-      - name: Restore pyproject name after oss wheel
-        if: always()
-        working-directory: dbt-oss/crates/dbt-sa-python
-        shell: pwsh
-        run: |
-          (Get-Content pyproject.toml) -replace '^name = "dbt-oss"$', 'name = "dbt-core"' |
-            Set-Content pyproject.toml
-          $line = Select-String -Path pyproject.toml -Pattern '^name = "dbt-core"$'
-          if (-not $line) { throw "restore did not land" }
 
       - name: Show built wheel(s)
         shell: pwsh
-        run: Get-ChildItem -Path dbt-oss -Recurse -Filter "*.whl"
+        run: Get-ChildItem dbt-oss\target\wheels\
 
       - name: Confirm build did not modify tracked sources, write upstream record
         shell: pwsh
@@ -165,18 +136,18 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dbt-oss-win-arm64-wheel
-          path: dbt-oss/**/target/wheels/*.whl
+          path: dbt-oss/target/wheels/*.whl
           if-no-files-found: error
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v3
         with:
-          subject-path: dbt-oss/**/target/wheels/*.whl
+          subject-path: dbt-oss/target/wheels/*.whl
 
       - name: Attest upstream source
-        uses: actions/attest@v4
+        uses: actions/attest@v3
         with:
-          subject-path: dbt-oss/**/target/wheels/*.whl
+          subject-path: dbt-oss/target/wheels/*.whl
           predicate-type: ${{ env.UPSTREAM_PREDICATE }}
           predicate-path: upstream-source.json
 
@@ -201,11 +172,6 @@ jobs:
         with:
           name: dbt-oss-win-arm64-wheel
 
-      - name: Flatten downloaded wheel(s) into cwd
-        run: |
-          find . -name '*.whl' -exec mv -t . -- {} +
-          ls -la *.whl
-
       - name: Verify attestations, then save bundles
         run: |
           for f in *.whl; do
@@ -213,14 +179,9 @@ jobs:
             gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" \
               --predicate-type "$UPSTREAM_PREDICATE"
             gh attestation download "$f" --repo "$GITHUB_REPOSITORY"
-            
-            # Robust file matching for sha256 colon or dash separators
-            att_file=$(ls sha256* 2>/dev/null | head -n 1)
-            if [ -n "$att_file" ]; then
-              mv "$att_file" "$f.attestations.jsonl"
-            fi
+            mv ./sha256:*.jsonl "$f.attestations.jsonl"
           done
-          ls -la
+          ls -l
 
       - name: Create or update GitHub Release
         run: |
