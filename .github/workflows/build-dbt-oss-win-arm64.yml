@@ -172,6 +172,11 @@ jobs:
         with:
           name: dbt-oss-win-arm64-wheel
 
+      - name: Flatten downloaded wheel(s) into cwd
+        run: |
+          find . -name '*.whl' -exec mv -t . -- {} +
+          ls -la *.whl
+
       - name: Verify attestations, then save bundles
         run: |
           for f in *.whl; do
