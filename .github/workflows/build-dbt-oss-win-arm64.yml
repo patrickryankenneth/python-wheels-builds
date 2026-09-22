@@ -105,10 +105,39 @@ jobs:
         shell: pwsh
         run: pip install maturin
 
-      - name: Build wheel natively for win_arm64
+      - name: Build wheel (dbt-core)
         working-directory: dbt-oss/crates/dbt-sa-python
         shell: pwsh
         run: maturin build --release
+
+      # dbt-oss is upstream's own documented rebrand of dbt-core (identical
+      # compiled extension, only [project].name differs) — see release-v2.yml's
+      # "Rename pyproject for oss wheel" step. Reproducing it here so both
+      # PyPI-style names resolve against this index while the community
+      # transitions off dbt-core.
+      - name: Rename pyproject for oss wheel
+        working-directory: dbt-oss/crates/dbt-sa-python
+        shell: pwsh
+        run: |
+          (Get-Content pyproject.toml) -replace '^name = "dbt-core"$', 'name = "dbt-oss"' |
+            Set-Content pyproject.toml
+          $line = Select-String -Path pyproject.toml -Pattern '^name = "dbt-oss"$'
+          if (-not $line) { throw "rename did not land" }
+
+      - name: Build wheel (dbt-oss)
+        working-directory: dbt-oss/crates/dbt-sa-python
+        shell: pwsh
+        run: maturin build --release
+
+      - name: Restore pyproject name after oss wheel
+        if: always()
+        working-directory: dbt-oss/crates/dbt-sa-python
+        shell: pwsh
+        run: |
+          (Get-Content pyproject.toml) -replace '^name = "dbt-oss"$', 'name = "dbt-core"' |
+            Set-Content pyproject.toml
+          $line = Select-String -Path pyproject.toml -Pattern '^name = "dbt-core"$'
+          if (-not $line) { throw "restore did not land" }
 
       - name: Show built wheel(s)
         shell: pwsh
