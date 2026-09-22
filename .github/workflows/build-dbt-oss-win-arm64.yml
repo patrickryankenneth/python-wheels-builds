@@ -7,6 +7,15 @@ on:
         description: 'Git tag in dbt-labs/dbt-oss to build (e.g. v2.0.5)'
         required: true
         default: 'v2.0.5'
+      package_targets:
+        description: 'Which distribution name(s) to build and publish'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - dbt-core
+          - dbt-oss
 
 permissions:
   contents: read
@@ -33,7 +42,6 @@ jobs:
         run: |
           $url = "https://github.com/dbt-labs/dbt-oss.git"
           $tag = $env:TAG
-          # Annotated tags need the peeled (^{}) ref to get the commit SHA.
           $line = git ls-remote $url "refs/tags/${tag}^{}"
           if (-not $line) { $line = git ls-remote $url "refs/tags/${tag}" }
           if (-not $line) { throw "Tag $tag not found in $url" }
@@ -105,14 +113,56 @@ jobs:
         shell: pwsh
         run: pip install maturin
 
-      - name: Build wheel natively for win_arm64
+      # Builds every requested distribution name into its own dist/<name>/
+      # folder, one at a time, so two wheels never sit in the same directory
+      # at once - the thing that made the earlier bundle-matching bug
+      # possible downstream. pyproject.toml is renamed only for the "dbt-oss"
+      # pass and restored immediately after, matching upstream's own
+      # release-v2.yml "Rename pyproject for oss wheel" step.
+      - name: Build requested wheel(s) into isolated per-name folders
         working-directory: dbt-oss/crates/dbt-sa-python
         shell: pwsh
-        run: maturin build --release
+        env:
+          PACKAGE_TARGETS: ${{ github.event.inputs.package_targets }}
+        run: |
+          $targets = if ($env:PACKAGE_TARGETS -eq "both") { @("dbt-core","dbt-oss") } else { @($env:PACKAGE_TARGETS) }
+          Write-Host "Building: $($targets -join ', ')"
+
+          foreach ($name in $targets) {
+            if ($name -eq "dbt-oss") {
+              (Get-Content pyproject.toml) -replace '^name = "dbt-core"$', 'name = "dbt-oss"' |
+                Set-Content pyproject.toml
+              if (-not (Select-String -Path pyproject.toml -Pattern '^name = "dbt-oss"$')) {
+                throw "rename to dbt-oss did not land"
+              }
+            }
+
+            Remove-Item -Recurse -Force target\wheels -ErrorAction SilentlyContinue
+            maturin build --release
+            if ($LASTEXITCODE -ne 0) { throw "maturin build failed for $name" }
+
+            $wheels = @(Get-ChildItem target\wheels -Filter "*.whl")
+            if ($wheels.Count -ne 1) {
+              throw "expected exactly 1 wheel for $name, found $($wheels.Count)"
+            }
+
+            $destDir = "..\..\..\dist\$name"
+            New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+            Move-Item $wheels[0].FullName "$destDir\$($wheels[0].Name)"
+            Write-Host "Built $name -> $destDir\$($wheels[0].Name)"
+
+            if ($name -eq "dbt-oss") {
+              (Get-Content pyproject.toml) -replace '^name = "dbt-oss"$', 'name = "dbt-core"' |
+                Set-Content pyproject.toml
+              if (-not (Select-String -Path pyproject.toml -Pattern '^name = "dbt-core"$')) {
+                throw "restore to dbt-core did not land"
+              }
+            }
+          }
 
       - name: Show built wheel(s)
         shell: pwsh
-        run: Get-ChildItem dbt-oss\target\wheels\
+        run: Get-ChildItem -Path dist -Recurse -Filter "*.whl"
 
       - name: Confirm build did not modify tracked sources, write upstream record
         shell: pwsh
@@ -132,22 +182,25 @@ jobs:
           } | ConvertTo-Json | Set-Content -Path upstream-source.json
           Get-Content upstream-source.json
 
-      - name: Upload wheel artifact
+      - name: Upload wheel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dbt-oss-win-arm64-wheel
-          path: dbt-oss/target/wheels/*.whl
+          name: dbt-wheels-win-arm64
+          path: dist/**/*.whl
           if-no-files-found: error
 
+      # Given a multi-file glob, this attests EACH matched file separately
+      # with its own correctly-scoped digest - one attestation per wheel,
+      # never mixed up. This part was never the source of the earlier bug.
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v3
         with:
-          subject-path: dbt-oss/target/wheels/*.whl
+          subject-path: dist/**/*.whl
 
       - name: Attest upstream source
-        uses: actions/attest@v3
+        uses: actions/attest@v4
         with:
-          subject-path: dbt-oss/target/wheels/*.whl
+          subject-path: dist/**/*.whl
           predicate-type: ${{ env.UPSTREAM_PREDICATE }}
           predicate-path: upstream-source.json
 
@@ -166,22 +219,56 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.event.inputs.dbt_oss_tag }}
       SHA: ${{ needs.build.outputs.upstream_sha }}
+      UPSTREAM_PREDICATE: https://patrickryankenneth.github.io/attestations/upstream-source/v1
     steps:
-      - name: Download wheel artifact
+      - name: Download wheel artifacts
         uses: actions/download-artifact@v4
         with:
-          name: dbt-oss-win-arm64-wheel
+          name: dbt-wheels-win-arm64
+          path: dist
 
-      - name: Verify attestations, then save bundles
+      - name: List downloaded wheels
+        run: find dist -name '*.whl'
+
+      # Fixes the earlier bug: instead of globbing for "any file starting
+      # with sha256" after the fact (which can grab a leftover from a prior
+      # iteration), this parses the exact filename gh attestation download
+      # reports for THIS wheel, in THIS iteration, and renames only that.
+      - name: Verify attestations and save bundles
         run: |
-          for f in *.whl; do
-            gh attestation verify "$f" --repo "$GITHUB_REPOSITORY"
-            gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" \
+          set -euo pipefail
+          mkdir -p release-assets
+          find dist -name '*.whl' -print0 | while IFS= read -r -d '' wheel; do
+            base=$(basename "$wheel")
+            echo "== $base =="
+            cp "$wheel" "release-assets/$base"
+
+            gh attestation verify "$wheel" --repo "$GITHUB_REPOSITORY"
+            gh attestation verify "$wheel" --repo "$GITHUB_REPOSITORY" \
               --predicate-type "$UPSTREAM_PREDICATE"
-            gh attestation download "$f" --repo "$GITHUB_REPOSITORY"
-            mv ./sha256:*.jsonl "$f.attestations.jsonl"
+
+            out=$(gh attestation download "$wheel" --repo "$GITHUB_REPOSITORY")
+            echo "$out"
+            bundle=$(echo "$out" | grep -oE 'sha256:[0-9a-f]+\.jsonl' | head -n1)
+            if [ -z "$bundle" ] || [ ! -f "$bundle" ]; then
+              echo "::error::could not locate attestation bundle for $base"
+              exit 1
+            fi
+            mv "$bundle" "release-assets/$base.attestations.jsonl"
           done
-          ls -l
+          echo "== release-assets =="
+          ls -la release-assets
+
+      - name: Sanity-check bundles are actually distinct
+        run: |
+          cd release-assets
+          n_wheels=$(ls -1 *.whl | wc -l)
+          n_unique_bundles=$(sha256sum *.attestations.jsonl | awk '{print $1}' | sort -u | wc -l)
+          echo "wheels: $n_wheels, unique bundle hashes: $n_unique_bundles"
+          if [ "$n_wheels" -gt 1 ] && [ "$n_unique_bundles" -lt "$n_wheels" ]; then
+            echo "::error::attestation bundles are not unique per wheel - refusing to publish"
+            exit 1
+          fi
 
       - name: Create or update GitHub Release
         run: |
@@ -192,4 +279,4 @@ jobs:
               --notes "Built from dbt-labs/dbt-oss@${SHA} (tag ${TAG}), unmodified. Verify with: gh attestation verify <wheel> --repo ${GITHUB_REPOSITORY}"
           fi
           gh release upload "$REL" --repo "$GITHUB_REPOSITORY" --clobber \
-            *.whl *.attestations.jsonl
+            release-assets/*
