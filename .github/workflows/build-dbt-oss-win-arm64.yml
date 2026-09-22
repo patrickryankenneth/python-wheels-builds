@@ -137,11 +137,11 @@ jobs:
               }
             }
 
-            Remove-Item -Recurse -Force target\wheels -ErrorAction SilentlyContinue
+            Remove-Item -Recurse -Force ..\..\target\wheels -ErrorAction SilentlyContinue
             maturin build --release
             if ($LASTEXITCODE -ne 0) { throw "maturin build failed for $name" }
 
-            $wheels = @(Get-ChildItem target\wheels -Filter "*.whl")
+            $wheels = @(Get-ChildItem ..\..\target\wheels -Filter "*.whl")
             if ($wheels.Count -ne 1) {
               throw "expected exactly 1 wheel for $name, found $($wheels.Count)"
             }
