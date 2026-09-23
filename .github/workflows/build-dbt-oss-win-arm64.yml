@@ -146,7 +146,7 @@ jobs:
           foreach ($name in $targets) {
             if ($name -eq "dbt-oss") {
               $raw = [System.IO.File]::ReadAllText($pyprojectPath)
-              $renamed = $raw -replace '(?m)^name = "dbt-core"$', 'name = "dbt-oss"'
+              $renamed = $raw -replace '(?m)^name = "dbt-core"(\r?)$', 'name = "dbt-oss"$1'
               if ($renamed -eq $raw) { throw "rename to dbt-oss did not match any line" }
               [System.IO.File]::WriteAllText($pyprojectPath, $renamed, $utf8NoBom)
             }
@@ -167,7 +167,7 @@ jobs:
 
             if ($name -eq "dbt-oss") {
               $raw = [System.IO.File]::ReadAllText($pyprojectPath)
-              $restored = $raw -replace '(?m)^name = "dbt-oss"$', 'name = "dbt-core"'
+              $restored = $raw -replace '(?m)^name = "dbt-oss"(\r?)$', 'name = "dbt-core"$1'
               if ($restored -eq $raw) { throw "restore to dbt-core did not match any line" }
               [System.IO.File]::WriteAllText($pyprojectPath, $restored, $utf8NoBom)
 
