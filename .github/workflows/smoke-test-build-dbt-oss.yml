@@ -1,0 +1,385 @@
+name: smoke-test-build-dbt-oss
+
+# Exercises every line of wrapper logic around the real build - checkout
+# verification, the CRLF-safe pyproject rename/restore, dist assembly,
+# both attestation calls, digest-based bundle download, signer-workflow
+# enforcement, draft-upload-verify-publish, and the build-log fetch -
+# against a trivial pyo3 crate that compiles in ~1-2 minutes instead of
+# dbt-oss's ~30. A bug in the wrapper fails here fast; only the real
+# compile step is different from build-dbt-oss-win-arm64.yml.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+env:
+  UPSTREAM_PREDICATE: https://patrickryankenneth.github.io/attestations/upstream-source/v1
+  POLICY_VERSION: smoke-test
+  TAG: smoke-${{ github.run_id }}
+
+jobs:
+  build:
+    runs-on: windows-11-arm
+    timeout-minutes: 20
+    env:
+      RUSTFLAGS: "--cap-lints=warn"
+    outputs:
+      upstream_sha: ${{ steps.upstream.outputs.sha }}
+    steps:
+      # Stands in for "Resolve upstream tag to commit" + "Checkout dbt-oss
+      # at resolved commit". A real `git init`/commit (not a canned sha) so
+      # the clean-tree check below is exercising real git plumbing, not a
+      # fixture that trivially passes.
+      - name: Create synthetic dbt-oss fixture (workspace + trivial pyo3 crate)
+        id: upstream
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $repo = "dbt-oss"
+          New-Item -ItemType Directory -Force -Path "$repo\crates\dbt-sa-python\src" | Out-Null
+
+          # Deliberately CRLF, matching a real Windows checkout with
+          # core.autocrlf - this is the exact file the rename/restore logic
+          # had to be fixed for.
+          $nl = "`r`n"
+          $pyproject = @(
+            '[build-system]'
+            'requires = ["maturin>=1.0,<2.0"]'
+            'build-backend = "maturin"'
+            ''
+            '[project]'
+            'name = "dbt-core"'
+            'version = "2.0.5"'
+            'requires-python = ">=3.11"'
+            ''
+            '[tool.maturin]'
+            'features = ["pyo3/extension-module"]'
+          ) -join $nl
+          [System.IO.File]::WriteAllText("$repo\crates\dbt-sa-python\pyproject.toml", $pyproject + $nl, (New-Object System.Text.UTF8Encoding($false)))
+
+          $cargoToml = @(
+            '[package]'
+            'name = "dbt_core"'
+            'version = "2.0.5"'
+            'edition = "2021"'
+            ''
+            '[lib]'
+            'name = "dbt_core"'
+            'crate-type = ["cdylib"]'
+            ''
+            '[dependencies]'
+            'pyo3 = { version = "0.22", features = ["extension-module", "abi3-py311"] }'
+          ) -join "`n"
+          Set-Content -Path "$repo\crates\dbt-sa-python\Cargo.toml" -Value $cargoToml -NoNewline
+
+          $lib = @(
+            'use pyo3::prelude::*;'
+            ''
+            '#[pyfunction]'
+            'fn smoke_ok() -> bool { true }'
+            ''
+            '#[pymodule]'
+            'fn dbt_core(m: &Bound<''_, PyModule>) -> PyResult<()> {'
+            '    m.add_function(wrap_pyfunction!(smoke_ok, m)?)?;'
+            '    Ok(())'
+            '}'
+          ) -join "`n"
+          Set-Content -Path "$repo\crates\dbt-sa-python\src\lib.rs" -Value $lib -NoNewline
+
+          $workspace = @(
+            '[workspace]'
+            'members = ["crates/dbt-sa-python"]'
+            'resolver = "2"'
+          ) -join "`n"
+          Set-Content -Path "$repo\Cargo.toml" -Value $workspace -NoNewline
+
+          git -C $repo init -q
+          git -C $repo config user.email "smoke@example.invalid"
+          git -C $repo config user.name "smoke-test"
+          Push-Location $repo
+          cargo generate-lockfile
+          if ($LASTEXITCODE -ne 0) { throw "cargo generate-lockfile failed" }
+          Pop-Location
+          git -C $repo add -A
+          git -C $repo commit -q -m "smoke test fixture"
+          $sha = (git -C $repo rev-parse HEAD).Trim()
+          Write-Host "Synthetic fixture committed as $sha"
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+
+      - name: Verify checkout is exact and unmodified
+        shell: pwsh
+        env:
+          SHA: ${{ steps.upstream.outputs.sha }}
+        run: |
+          $head = git -C dbt-oss rev-parse HEAD
+          if ($head -ne $env:SHA) { throw "HEAD $head != expected $env:SHA" }
+          if (git -C dbt-oss status --porcelain) { throw "Working tree is not clean" }
+          echo "Checkout verified: $head"
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          cache-workspaces: "dbt-oss -> target"
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@9e326ebed976843c9932b3aa0e021c6f50310eb4 # v0.0.6
+
+      - name: Expose GHA cache env vars for sccache
+        uses: crazy-max/ghaction-github-runtime@3cb05d89e1f492524af3d41a1c98c83bc3025124 # v3
+
+      - name: Start sccache and set wrapper
+        shell: pwsh
+        run: |
+          $env:SCCACHE_GHA_ENABLED = "true"
+          & sccache --start-server
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "sccache backend unhealthy - continuing without cache"
+            & sccache --stop-server 2>$null
+            $global:LASTEXITCODE = 0
+          } else {
+            echo "SCCACHE_GHA_ENABLED=true" >> $env:GITHUB_ENV
+            echo "RUSTC_WRAPPER=sccache" >> $env:GITHUB_ENV
+          }
+
+      - name: Install maturin
+        shell: pwsh
+        run: pip install maturin
+
+      # Identical logic to the real workflow's build step - this is the
+      # part that actually broke last time (CRLF-blind regex anchor), so
+      # it's copied verbatim rather than simplified, on purpose.
+      - name: Build requested wheel(s) into isolated per-name folders
+        working-directory: dbt-oss/crates/dbt-sa-python
+        shell: pwsh
+        env:
+          PACKAGE_TARGETS: both
+        run: |
+          $targets = if ($env:PACKAGE_TARGETS -eq "both") { @("dbt-core","dbt-oss") } else { @($env:PACKAGE_TARGETS) }
+          Write-Host "Building: $($targets -join ', ')"
+
+          $pyprojectPath = (Resolve-Path pyproject.toml).Path
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          $originalHash = (Get-FileHash $pyprojectPath -Algorithm SHA256).Hash
+
+          foreach ($name in $targets) {
+            if ($name -eq "dbt-oss") {
+              $raw = [System.IO.File]::ReadAllText($pyprojectPath)
+              $renamed = $raw -replace '(?m)^name = "dbt-core"(\r?)$', 'name = "dbt-oss"$1'
+              if ($renamed -eq $raw) { throw "rename to dbt-oss did not match any line" }
+              [System.IO.File]::WriteAllText($pyprojectPath, $renamed, $utf8NoBom)
+            }
+
+            Remove-Item -Recurse -Force ..\..\target\wheels -ErrorAction SilentlyContinue
+            maturin build --release --locked
+            if ($LASTEXITCODE -ne 0) { throw "maturin build failed for $name" }
+
+            $wheels = @(Get-ChildItem ..\..\target\wheels -Filter "*.whl")
+            if ($wheels.Count -ne 1) {
+              throw "expected exactly 1 wheel for $name, found $($wheels.Count)"
+            }
+
+            $destDir = "..\..\..\dist\$name"
+            New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+            Move-Item $wheels[0].FullName "$destDir\$($wheels[0].Name)"
+            Write-Host "Built $name -> $destDir\$($wheels[0].Name)"
+
+            if ($name -eq "dbt-oss") {
+              $raw = [System.IO.File]::ReadAllText($pyprojectPath)
+              $restored = $raw -replace '(?m)^name = "dbt-oss"(\r?)$', 'name = "dbt-core"$1'
+              if ($restored -eq $raw) { throw "restore to dbt-core did not match any line" }
+              [System.IO.File]::WriteAllText($pyprojectPath, $restored, $utf8NoBom)
+
+              $restoredHash = (Get-FileHash $pyprojectPath -Algorithm SHA256).Hash
+              if ($restoredHash -ne $originalHash) {
+                throw "pyproject.toml restore hash mismatch: got $restoredHash, expected $originalHash"
+              }
+            }
+          }
+
+      - name: Show built wheel(s)
+        shell: pwsh
+        run: Get-ChildItem -Path dist -Recurse -Filter "*.whl"
+
+      - name: Confirm build did not modify tracked sources, write upstream record
+        shell: pwsh
+        env:
+          SHA: ${{ steps.upstream.outputs.sha }}
+          POLICY_VERSION: ${{ env.POLICY_VERSION }}
+        run: |
+          git -C dbt-oss diff --quiet HEAD
+          if ($LASTEXITCODE -ne 0) { throw "Build modified tracked source files" }
+          $head = git -C dbt-oss rev-parse HEAD
+          if ($head -ne $env:SHA) { throw "HEAD $head != expected $env:SHA" }
+          @{
+            upstream_repo   = "synthetic-smoke-test-fixture"
+            upstream_tag    = $env:TAG
+            upstream_commit = $head
+            tree_clean      = $true
+            policy_version  = $env:POLICY_VERSION
+          } | ConvertTo-Json | Set-Content -Path upstream-source.json
+          Get-Content upstream-source.json
+
+      - name: Upload wheel artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dbt-wheels-win-arm64
+          path: dist/**/*.whl
+          if-no-files-found: error
+
+      - name: Attest build provenance (dbt-core)
+        if: hashFiles('dist/dbt-core/*.whl') != ''
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: dist/dbt-core/*.whl
+
+      - name: Attest upstream source (dbt-core)
+        if: hashFiles('dist/dbt-core/*.whl') != ''
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/dbt-core/*.whl
+          predicate-type: ${{ env.UPSTREAM_PREDICATE }}
+          predicate-path: upstream-source.json
+
+      - name: Attest build provenance (dbt-oss)
+        if: hashFiles('dist/dbt-oss/*.whl') != ''
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: dist/dbt-oss/*.whl
+
+      - name: Attest upstream source (dbt-oss)
+        if: hashFiles('dist/dbt-oss/*.whl') != ''
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/dbt-oss/*.whl
+          predicate-type: ${{ env.UPSTREAM_PREDICATE }}
+          predicate-path: upstream-source.json
+
+      - name: sccache stats
+        if: always()
+        shell: pwsh
+        run: sccache --show-stats
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      attestations: read
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SHA: ${{ needs.build.outputs.upstream_sha }}
+      UPSTREAM_PREDICATE: https://patrickryankenneth.github.io/attestations/upstream-source/v1
+      SIGNER_WORKFLOW: ${{ github.repository }}/.github/workflows/smoke-test-build-dbt-oss.yml
+    steps:
+      - name: Download wheel artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dbt-wheels-win-arm64
+          path: dist
+
+      - name: List downloaded wheels
+        run: find dist -name '*.whl'
+
+      - name: Fetch build job log
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          job_id=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" \
+            --jq '.jobs[] | select(.name=="build") | .id')
+          if [ -z "$job_id" ]; then
+            echo "::error::could not find the build job's id in this run"
+            exit 1
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/actions/jobs/${job_id}/logs" > build-log.txt
+          gzip -9 build-log.txt
+          mv build-log.txt.gz "release-assets/build-log-${TAG}.txt.gz"
+          echo "Saved build log for job $job_id"
+
+      - name: Verify attestations and save bundles
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          find dist -name '*.whl' -print0 | while IFS= read -r -d '' wheel; do
+            base=$(basename "$wheel")
+            echo "== $base =="
+            cp "$wheel" "release-assets/$base"
+
+            gh attestation verify "$wheel" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$SIGNER_WORKFLOW"
+            gh attestation verify "$wheel" --repo "$GITHUB_REPOSITORY" \
+              --predicate-type "$UPSTREAM_PREDICATE" \
+              --signer-workflow "$SIGNER_WORKFLOW"
+
+            digest="sha256:$(sha256sum "$wheel" | cut -d' ' -f1)"
+            gh attestation download "$wheel" --repo "$GITHUB_REPOSITORY" >/dev/null
+
+            bundle="${digest}.jsonl"
+            if [ ! -f "$bundle" ]; then
+              echo "::error::expected attestation bundle $bundle not found for $base"
+              exit 1
+            fi
+            mv "$bundle" "release-assets/$base.attestations.jsonl"
+          done
+          echo "== release-assets =="
+          ls -la release-assets
+
+      - name: Sanity-check bundles are actually distinct
+        run: |
+          cd release-assets
+          n_wheels=$(ls -1 *.whl | wc -l)
+          n_unique_bundles=$(sha256sum *.attestations.jsonl | awk '{print $1}' | sort -u | wc -l)
+          echo "wheels: $n_wheels, unique bundle hashes: $n_unique_bundles"
+          if [ "$n_wheels" -gt 1 ] && [ "$n_unique_bundles" -lt "$n_wheels" ]; then
+            echo "::error::attestation bundles are not unique per wheel - refusing to publish"
+            exit 1
+          fi
+
+      - name: Create draft, upload, verify, then publish
+        run: |
+          set -euo pipefail
+          REL="dbt-oss-${TAG}"
+          expected=$(cd release-assets && ls -1 | sort)
+
+          if gh release view "$REL" --repo "$GITHUB_REPOSITORY" \
+               --json isDraft,assets > /tmp/rel.json 2>/dev/null; then
+            isDraft=$(jq -r '.isDraft' /tmp/rel.json)
+            existing=$(jq -r '.assets[].name' /tmp/rel.json | sort)
+
+            if [ "$isDraft" = "false" ]; then
+              if [ "$existing" = "$expected" ]; then
+                echo "Release $REL is already published with these exact assets - nothing to do"
+                exit 0
+              fi
+              echo "::error::Published release $REL already exists with a different asset set - refusing to overwrite"
+              exit 1
+            fi
+            echo "Resuming incomplete draft release $REL (not yet public)"
+          else
+            gh release create "$REL" --repo "$GITHUB_REPOSITORY" --draft --prerelease \
+              --title "SMOKE TEST - $REL" \
+              --notes "Smoke test run - exercises the wrapper logic only, not a real dbt-oss build. Deleted automatically at the end of this run."
+          fi
+
+          gh release upload "$REL" --repo "$GITHUB_REPOSITORY" --clobber release-assets/*
+
+          final=$(gh release view "$REL" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | sort)
+          if [ "$final" != "$expected" ]; then
+            echo "::error::Uploaded asset set does not match expected set - not publishing"
+            exit 1
+          fi
+
+          gh release edit "$REL" --repo "$GITHUB_REPOSITORY" --draft=false
+          echo "Published $REL"
+
+      # Smoke tests shouldn't leave artifacts lying around in the repo's
+      # release list. Runs even if an earlier step failed, so a failed
+      # smoke test doesn't also leak a half-finished draft.
+      - name: Clean up smoke test release and tag
+        if: always()
+        run: |
+          REL="dbt-oss-${TAG}"
+          gh release delete "$REL" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
