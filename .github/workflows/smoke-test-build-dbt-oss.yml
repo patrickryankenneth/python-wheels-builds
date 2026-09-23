@@ -294,7 +294,7 @@ jobs:
             echo "::error::could not find the build job's id in this run"
             exit 1
           fi
-          gh api "repos/${GITHUB_REPOSITORY}/actions/jobs/${job_id}/logs" > build-log.txt
+          gh api "repos/${GITHUB_REPOSITORY}/actions/jobs/${job_id}/logs" --allow-escape-sequences > build-log.txt
           gzip -9 build-log.txt
           mv build-log.txt.gz "release-assets/build-log-${TAG}.txt.gz"
           echo "Saved build log for job $job_id"
