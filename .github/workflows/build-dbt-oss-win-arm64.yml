@@ -192,13 +192,13 @@
         # Given a multi-file glob, this attests EACH matched file separately
         # with its own correctly-scoped digest - one attestation per wheel,
         # never mixed up. This part was never the source of the earlier bug.
-              - name: Attest build provenance (dbt-core)
+        - name: Attest build provenance (dbt-core)
         if: hashFiles('dist/dbt-core/*.whl') != ''
         uses: actions/attest-build-provenance@v3
         with:
           subject-path: dist/dbt-core/*.whl
 
-      - name: Attest upstream source (dbt-core)
+        - name: Attest upstream source (dbt-core)
         if: hashFiles('dist/dbt-core/*.whl') != ''
         uses: actions/attest@v4
         with:
@@ -206,13 +206,13 @@
           predicate-type: ${{ env.UPSTREAM_PREDICATE }}
           predicate-path: upstream-source.json
 
-      - name: Attest build provenance (dbt-oss)
+        - name: Attest build provenance (dbt-oss)
         if: hashFiles('dist/dbt-oss/*.whl') != ''
         uses: actions/attest-build-provenance@v3
         with:
           subject-path: dist/dbt-oss/*.whl
 
-      - name: Attest upstream source (dbt-oss)
+        - name: Attest upstream source (dbt-oss)
         if: hashFiles('dist/dbt-oss/*.whl') != ''
         uses: actions/attest@v4
         with:
