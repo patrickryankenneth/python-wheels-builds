@@ -252,6 +252,7 @@ jobs:
     permissions:
       contents: write
       attestations: read
+      actions: read # needed to fetch the build job's log via the Actions API
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.event.inputs.dbt_oss_tag }}
@@ -269,6 +270,28 @@ jobs:
 
       - name: List downloaded wheels
         run: find dist -name '*.whl'
+
+      # GitHub Actions logs are only retained ~90 days by default. Fetching
+      # the build job's log here works because this job only starts once
+      # `needs: build` has finished - the log is already complete and
+      # fetchable via the API, not something being read mid-run. Landing it
+      # in release-assets/ now means it's picked up automatically by the
+      # draft-upload-verify-publish step below, same as the wheels and
+      # attestation bundles: no release goes public without it attached.
+      - name: Fetch build job log
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          job_id=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" \
+            --jq '.jobs[] | select(.name=="build") | .id')
+          if [ -z "$job_id" ]; then
+            echo "::error::could not find the build job's id in this run"
+            exit 1
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/actions/jobs/${job_id}/logs" > build-log.txt
+          gzip -9 build-log.txt
+          mv build-log.txt.gz "release-assets/build-log-${TAG}.txt.gz"
+          echo "Saved build log for job $job_id"
 
       # Fixes the earlier bug: instead of globbing for "any file starting
       # with sha256" after the fact (which can grab a leftover from a prior
