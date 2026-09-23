@@ -119,6 +119,23 @@ jobs:
           if (git -C dbt-oss status --porcelain) { throw "Working tree is not clean" }
           echo "Checkout verified: $head"
 
+      - name: Create source archive and compute digest
+        id: archive
+        shell: pwsh
+        env:
+          SHA: ${{ steps.upstream.outputs.sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path source-archive | Out-Null
+          $archiveName = "dbt-oss-source-$env:SHA.tar.gz"
+          $archivePath = "source-archive\$archiveName"
+          git -C dbt-oss archive --format=tar.gz --output="$PWD\$archivePath" HEAD
+          if ($LASTEXITCODE -ne 0) { throw "git archive failed" }
+          $hash = (Get-FileHash $archivePath -Algorithm SHA256).Hash.ToLower()
+          Write-Host "Source archive: $archiveName sha256=$hash"
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+          "name=$archiveName" >> $env:GITHUB_OUTPUT
+
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
@@ -208,17 +225,21 @@ jobs:
         env:
           SHA: ${{ steps.upstream.outputs.sha }}
           POLICY_VERSION: ${{ env.POLICY_VERSION }}
+          ARCHIVE_NAME: ${{ steps.archive.outputs.name }}
+          ARCHIVE_SHA256: ${{ steps.archive.outputs.sha256 }}
         run: |
           git -C dbt-oss diff --quiet HEAD
           if ($LASTEXITCODE -ne 0) { throw "Build modified tracked source files" }
           $head = git -C dbt-oss rev-parse HEAD
           if ($head -ne $env:SHA) { throw "HEAD $head != expected $env:SHA" }
           @{
-            upstream_repo   = "synthetic-smoke-test-fixture"
-            upstream_tag    = $env:TAG
-            upstream_commit = $head
-            tree_clean      = $true
-            policy_version  = $env:POLICY_VERSION
+            upstream_repo           = "synthetic-smoke-test-fixture"
+            upstream_tag            = $env:TAG
+            upstream_commit         = $head
+            tree_clean              = $true
+            policy_version          = $env:POLICY_VERSION
+            snapshot_archive_name   = $env:ARCHIVE_NAME
+            snapshot_archive_sha256 = $env:ARCHIVE_SHA256
           } | ConvertTo-Json | Set-Content -Path upstream-source.json
           Get-Content upstream-source.json
 
@@ -227,6 +248,13 @@ jobs:
         with:
           name: dbt-wheels-win-arm64
           path: dist/**/*.whl
+          if-no-files-found: error
+
+      - name: Upload source archive artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dbt-source-archive
+          path: source-archive/*.tar.gz
           if-no-files-found: error
 
       - name: Attest build provenance (dbt-core)
@@ -283,6 +311,12 @@ jobs:
 
       - name: List downloaded wheels
         run: find dist -name '*.whl'
+
+      - name: Download source archive artifact into release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dbt-source-archive
+          path: release-assets
 
       - name: Fetch build job log
         run: |
