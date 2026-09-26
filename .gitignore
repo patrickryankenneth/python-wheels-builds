@@ -1,0 +1,22 @@
+# Local verification/test artifacts - wheels, source archives, and
+# attestation bundles fetched or built locally (e.g. via `gh run download`
+# or a local smoke-test run). These are build outputs, not source - the
+# real, attested copies live on GitHub Releases, not in git history.
+pywheels-sample/
+*.whl
+*.tar.gz
+*.jsonl
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

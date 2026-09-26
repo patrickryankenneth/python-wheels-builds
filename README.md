@@ -11,6 +11,13 @@ both *what was built* and *where it came from*, so anyone downloading a
 wheel from here can verify it matches upstream — without having to trust
 this repo blindly.
 
+> **Disclaimer:** `python-wheels-builds` is an independent, unofficial
+> project. It is **not affiliated with, endorsed by, or sponsored by**
+> PyPA, PyPI, the Python Software Foundation, or the upstream projects it
+> builds wheels for (e.g. `dbt-labs`/`dbt-oss`). Wheels published here are
+> built from unmodified upstream source and attested as such, but they are
+> a third-party build, not an official release from the upstream project.
+
 ## Why this exists
 
 Some popular Python packages with native (Rust/C) extensions don't ship
