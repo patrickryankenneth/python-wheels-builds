@@ -1,7 +1,4 @@
-# Local verification/test artifacts - wheels, source archives, and
-# attestation bundles fetched or built locally (e.g. via `gh run download`
-# or a local smoke-test run). These are build outputs, not source - the
-# real, attested copies live on GitHub Releases, not in git history.
+# Local verification/test artifacts
 pywheels-sample/
 *.whl
 *.tar.gz
@@ -20,4 +17,11 @@ build/
 .vscode/
 .idea/
 .DS_Store
-builder/
+
+# Ephemeral build artifacts (never tracked, never published)
+environments/*/*
+!environments/*/Containerfile
+recipes/*/.work/
+recipes/*/dist/
+recipes/*/logs/
+*.log

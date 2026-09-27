@@ -13,8 +13,8 @@ on:
         default: "both"
   push:
     paths:
-      - "builder/Containerfile.alpine-musl-builder"
-      - "builder/build.sh"
+      - "environments/alpine-3.20-musl/Containerfile"
+      - "recipes/dbt-oss/build.sh"
       - ".github/workflows/build-dbt-oss-musllinux.yml"
 
 jobs:
@@ -25,7 +25,7 @@ jobs:
       PACKAGE_TARGETS: ${{ inputs.package_targets || 'both' }}
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v5
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # Mirrors the local ~/.cache/pywheels-alpine bind mounts: cargo
       # registry/git index, the cargo target dir (fingerprints + build
@@ -43,10 +43,10 @@ jobs:
             ~/pywheels-cache/sccache
           key: >-
             pywheels-musllinux-
-            ${{ hashFiles('builder/Containerfile.alpine-musl-builder') }}-
+            ${{ hashFiles('environments/alpine-3.20-musl/Containerfile') }}-
             ${{ env.DBT_OSS_TAG }}
           restore-keys: |
-            pywheels-musllinux-${{ hashFiles('builder/Containerfile.alpine-musl-builder') }}-
+            pywheels-musllinux-${{ hashFiles('environments/alpine-3.20-musl/Containerfile') }}-
             pywheels-musllinux-
 
       - name: Prepare cache dirs
@@ -55,14 +55,14 @@ jobs:
                    ~/pywheels-cache/cargo-git \
                    ~/pywheels-cache/cargo-target \
                    ~/pywheels-cache/sccache \
-                   "${{ github.workspace }}/builder/workdir/dist"
+                   "${{ github.workspace }}/recipes/dbt-oss/dist"
 
       - name: Build builder image
         run: |
           docker build \
-            -f builder/Containerfile.alpine-musl-builder \
+            -f environments/alpine-3.20-musl/Containerfile \
             -t pywheels-alpine-builder \
-            builder/
+            environments/alpine-3.20-musl/
 
       # Same env vars, same mounts, same script as the local podman run -
       # this is the exact command that produced a working wheel locally
@@ -77,7 +77,7 @@ jobs:
             -v ~/pywheels-cache/cargo-git:/opt/cargo/git \
             -v ~/pywheels-cache/cargo-target:/cargo-target \
             -v ~/pywheels-cache/sccache:/sccache \
-            -v "${{ github.workspace }}/builder/workdir:/build" \
+            -v "${{ github.workspace }}/recipes/dbt-oss:/build" \
             pywheels-alpine-builder \
             sh /build/build.sh
 
@@ -85,7 +85,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: dbt-wheels-musllinux-${{ env.DBT_OSS_TAG }}
-          path: builder/workdir/dist/**/*.whl
+          path: recipes/dbt-oss/dist/**/*.whl
           if-no-files-found: error
 
       - name: Upload cargo timing report

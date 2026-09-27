@@ -1,0 +1,80 @@
+# Alpine/musl build environment for dbt-oss's Rust extension, built with
+# maturin. Alpine's libc IS musl, so building natively inside this image
+# (rather than cross-compiling from a glibc host) produces a wheel already
+# tagged correctly for musllinux - no cross-toolchain juggling.
+#
+# This image is the reusable *environment*, not a specific build. The
+# actual clone-at-pinned-ref + maturin build step is deliberately NOT
+# baked in here - see build.sh (TODO, blocked on knowing the exact repo/
+# ref/flags build-dbt-oss-win-arm64.yml already uses) - so this image can
+# be rebuilt independently of that and reused across iterations.
+
+FROM docker.io/library/alpine:3.20
+
+# build-base: gcc/make/etc - the C toolchain Rust's linker needs.
+# python3-dev: maturin's build backend links against libpython.
+# openssl-dev/libffi-dev: common transitive needs for Rust crates with
+# native deps; harmless to include even if dbt-oss's Rust side doesn't
+# need them - cheap compared to a rebuild if it turns out one is missing.
+# NOTE: Alpine has no package literally named "protoc" - the binary ships
+# in "protobuf" (protobuf-dev is headers/well-known-types only, no binary
+# by itself). An earlier version of this file listed "protoc" here, which
+# is not a real apk package name - do not reintroduce it.
+RUN apk add --no-cache \
+        build-base \
+        curl \
+        git \
+        python3 \
+        python3-dev \
+        py3-pip \
+        openssl-dev \
+        openssl-libs-static \
+        libffi-dev \
+        pkgconfig \
+        perl \
+        make \
+        patchelf \
+        protobuf \
+        protobuf-dev
+
+# maturin's wheel-repair step (bundling libgcc_s.so.1 etc. into the wheel)
+# shells out to patchelf - verify it's actually present now, not after
+# another full compile.
+RUN patchelf --version
+
+# Fail the image build in seconds if protoc didn't actually land, instead
+# of discovering it minutes into a cargo build later (what just happened).
+RUN protoc --version
+
+# prost-build (dbt-state's build.rs dep) reads these two vars directly if
+# set - this is prost-build's own documented "typical Linux install" config,
+# not Alpine-specific. Without PROTOC_INCLUDE it falls back to its own
+# bundled well-known-types rather than failing, so this is a belt-and-
+# suspenders match to upstream docs, not a confirmed bug workaround.
+ENV PROTOC=/usr/bin/protoc \
+    PROTOC_INCLUDE=/usr/include
+
+# rustup rather than apk's rust package: apk's rust floats to whatever
+# Alpine 3.20 currently ships, which can lag; rustup lets us pin an exact
+# toolchain version deliberately - the same reasoning pyproject.toml
+# already applies to pinning sigstore's version range (a build/security
+# -relevant toolchain shouldn't silently float).
+ENV RUSTUP_HOME=/opt/rustup \
+    CARGO_HOME=/opt/cargo \
+    PATH=/opt/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain stable --profile minimal
+
+# sccache: compilation is the expensive part of iterating on this build.
+# Cache lives on a bind-mounted host dir at run time (SCCACHE_DIR below),
+# not baked into the image - the image is a reusable environment, not a
+# snapshot of one build's cache state.
+RUN cargo install sccache --locked
+ENV RUSTC_WRAPPER=/opt/cargo/bin/sccache \
+    SCCACHE_DIR=/sccache \
+    CARGO_TARGET_DIR=/cargo-target
+
+RUN pip install --break-system-packages --no-cache-dir maturin
+
+WORKDIR /build
+CMD ["/bin/sh"]
