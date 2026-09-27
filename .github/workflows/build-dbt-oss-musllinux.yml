@@ -21,6 +21,14 @@ on:
       - "recipes/dbt-oss/build.sh"
       - ".github/workflows/build-dbt-oss-musllinux.yml"
 
+# packages: read is required to pull the (private-by-default) GHCR image -
+# without it, `docker pull` on a private package returns "denied" even
+# with a correct tag, because an unauthenticated pull never even attempts
+# to use the token.
+permissions:
+  contents: read
+  packages: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -28,16 +36,11 @@ jobs:
       DBT_OSS_TAG: ${{ inputs.dbt_oss_tag || 'v2.0.5' }}
       PACKAGE_TARGETS: ${{ inputs.package_targets || 'both' }}
       COLD_CACHE: ${{ inputs.cold_cache || '0' }}
+      IMAGE: ghcr.io/${{ github.repository_owner }}/pywheels-alpine-builder
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      # Mirrors the local ~/.cache/pywheels-alpine bind mounts: cargo
-      # registry/git index, the cargo target dir (fingerprints + build
-      # artifacts), and sccache's object cache. Cache key is scoped to the
-      # Containerfile + Cargo.lock so a toolchain/profile change (like the
-      # earlier LTO/codegen-units switch) correctly busts the cache instead
-      # of silently reusing stale, incompatible fingerprints.
       - name: Cache cargo + sccache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -62,23 +65,34 @@ jobs:
                    ~/pywheels-cache/sccache \
                    "${{ github.workspace }}/recipes/dbt-oss/dist"
 
+      # Was missing entirely before - this is why the pull below was
+      # returning "denied" on both the hash tag and :latest. Same login
+      # build-environment-image.yml already does before its push.
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
       - name: Pull builder image
         run: |
-          docker pull ghcr.io/${{ github.repository_owner }}/pywheels-alpine-builder:${{ hashFiles('environments/alpine-3.20-musl/Containerfile') }} \
-            || docker pull ghcr.io/${{ github.repository_owner }}/pywheels-alpine-builder:latest
-          docker tag ghcr.io/${{ github.repository_owner }}/pywheels-alpine-builder:${{ hashFiles('environments/alpine-3.20-musl/Containerfile') }} pywheels-alpine-builder \
-            || docker tag ghcr.io/${{ github.repository_owner }}/pywheels-alpine-builder:latest pywheels-alpine-builder
+          docker pull "${IMAGE}:${{ hashFiles('environments/alpine-3.20-musl/Containerfile') }}" \
+            || docker pull "${IMAGE}:latest"
+          docker tag "${IMAGE}:${{ hashFiles('environments/alpine-3.20-musl/Containerfile') }}" pywheels-alpine-builder \
+            || docker tag "${IMAGE}:latest" pywheels-alpine-builder
 
-      # Same env vars, same mounts, same script as the local podman run -
-      # this is the exact command that produced a working wheel locally
-      # (60m42s cold, 10.56s warm off cache).
+      # --user pins the container's UID/GID to the host runner user, so
+      # everything it writes into the bind-mounted cache dirs is owned by
+      # that same user. Without this, the container's default root user
+      # owns those files, and the later `actions/cache` save step (which
+      # runs as the unprivileged runner user) gets Permission denied on
+      # every one of them - the save silently fails and nothing persists.
       - name: Run build.sh in container
         run: |
           docker run --rm \
+            --user "$(id -u):$(id -g)" \
             -e RUSTFLAGS="--cap-lints=warn" \
             -e DBT_OSS_TAG="${DBT_OSS_TAG}" \
             -e PACKAGE_TARGETS="${PACKAGE_TARGETS}" \
             -e COLD_CACHE="${COLD_CACHE}" \
+            -e HOME=/tmp \
             -v ~/pywheels-cache/cargo-registry:/opt/cargo/registry \
             -v ~/pywheels-cache/cargo-git:/opt/cargo/git \
             -v ~/pywheels-cache/cargo-target:/cargo-target \
