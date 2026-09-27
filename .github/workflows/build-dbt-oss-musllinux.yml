@@ -62,12 +62,12 @@ jobs:
                    ~/pywheels-cache/sccache \
                    "${{ github.workspace }}/recipes/dbt-oss/dist"
 
-      - name: Build builder image
+      - name: Pull builder image
         run: |
-          docker build \
-            -f environments/alpine-3.20-musl/Containerfile \
-            -t pywheels-alpine-builder \
-            environments/alpine-3.20-musl/
+          docker pull ghcr.io/${{ github.repository_owner }}/pywheels-alpine-builder:${{ hashFiles('environments/alpine-3.20-musl/Containerfile') }} \
+            || docker pull ghcr.io/${{ github.repository_owner }}/pywheels-alpine-builder:latest
+          docker tag ghcr.io/${{ github.repository_owner }}/pywheels-alpine-builder:${{ hashFiles('environments/alpine-3.20-musl/Containerfile') }} pywheels-alpine-builder \
+            || docker tag ghcr.io/${{ github.repository_owner }}/pywheels-alpine-builder:latest pywheels-alpine-builder
 
       # Same env vars, same mounts, same script as the local podman run -
       # this is the exact command that produced a working wheel locally
