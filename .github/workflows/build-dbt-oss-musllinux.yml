@@ -1,0 +1,97 @@
+name: build-dbt-oss-musllinux
+
+on:
+  workflow_dispatch:
+    inputs:
+      dbt_oss_tag:
+        description: "dbt-oss tag to build"
+        required: true
+        default: "v2.0.5"
+      package_targets:
+        description: "dbt-core, dbt-oss, or both"
+        required: true
+        default: "both"
+  push:
+    paths:
+      - "builder/Containerfile.alpine-musl-builder"
+      - "builder/build.sh"
+      - ".github/workflows/build-dbt-oss-musllinux.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      DBT_OSS_TAG: ${{ inputs.dbt_oss_tag || 'v2.0.5' }}
+      PACKAGE_TARGETS: ${{ inputs.package_targets || 'both' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # Mirrors the local ~/.cache/pywheels-alpine bind mounts: cargo
+      # registry/git index, the cargo target dir (fingerprints + build
+      # artifacts), and sccache's object cache. Cache key is scoped to the
+      # Containerfile + Cargo.lock so a toolchain/profile change (like the
+      # earlier LTO/codegen-units switch) correctly busts the cache instead
+      # of silently reusing stale, incompatible fingerprints.
+      - name: Cache cargo + sccache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/pywheels-cache/cargo-registry
+            ~/pywheels-cache/cargo-git
+            ~/pywheels-cache/cargo-target
+            ~/pywheels-cache/sccache
+          key: >-
+            pywheels-musllinux-
+            ${{ hashFiles('builder/Containerfile.alpine-musl-builder') }}-
+            ${{ env.DBT_OSS_TAG }}
+          restore-keys: |
+            pywheels-musllinux-${{ hashFiles('builder/Containerfile.alpine-musl-builder') }}-
+            pywheels-musllinux-
+
+      - name: Prepare cache dirs
+        run: |
+          mkdir -p ~/pywheels-cache/cargo-registry \
+                   ~/pywheels-cache/cargo-git \
+                   ~/pywheels-cache/cargo-target \
+                   ~/pywheels-cache/sccache \
+                   "${{ github.workspace }}/builder/workdir/dist"
+
+      - name: Build builder image
+        run: |
+          docker build \
+            -f builder/Containerfile.alpine-musl-builder \
+            -t pywheels-alpine-builder \
+            builder/
+
+      # Same env vars, same mounts, same script as the local podman run -
+      # this is the exact command that produced a working wheel locally
+      # (60m42s cold, 10.56s warm off cache).
+      - name: Run build.sh in container
+        run: |
+          docker run --rm \
+            -e RUSTFLAGS="--cap-lints=warn" \
+            -e DBT_OSS_TAG="${DBT_OSS_TAG}" \
+            -e PACKAGE_TARGETS="${PACKAGE_TARGETS}" \
+            -v ~/pywheels-cache/cargo-registry:/opt/cargo/registry \
+            -v ~/pywheels-cache/cargo-git:/opt/cargo/git \
+            -v ~/pywheels-cache/cargo-target:/cargo-target \
+            -v ~/pywheels-cache/sccache:/sccache \
+            -v "${{ github.workspace }}/builder/workdir:/build" \
+            pywheels-alpine-builder \
+            sh /build/build.sh
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbt-wheels-musllinux-${{ env.DBT_OSS_TAG }}
+          path: builder/workdir/dist/**/*.whl
+          if-no-files-found: error
+
+      - name: Upload cargo timing report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cargo-timings-${{ env.DBT_OSS_TAG }}
+          path: ~/pywheels-cache/cargo-target/cargo-timings/*.html
+          if-no-files-found: ignore
