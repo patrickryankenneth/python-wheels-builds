@@ -94,7 +94,10 @@ jobs:
           sccache --show-stats
 
           echo "== clearing \$CARGO_TARGET_DIR, rebuilding (expect cache hits) =="
-          rm -rf "$CARGO_TARGET_DIR"
+          # $CARGO_TARGET_DIR is itself a bind-mount point (-v .../cargo-target:/cargo-target),
+          # so `rm -rf "$CARGO_TARGET_DIR"` fails with "Resource busy" - you can't unlink a
+          # directory that's an active mount. Empty its contents instead of removing it.
+          find "$CARGO_TARGET_DIR" -mindepth 1 -delete
           cargo build --release
 
           echo "-- stats after rebuild --"
