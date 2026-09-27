@@ -1,14 +1,22 @@
 name: smoke-test-cache-perms
 
-# Isolates the exact failure from build-dbt-oss-musllinux.yml's last run:
-# docker writing into ~/pywheels-cache/* as root, then actions/cache's
-# save step (running as the unprivileged runner user) getting Permission
-# denied trying to read those files back out to pack cache.tzst.
+# Isolates the fix for build-dbt-oss-musllinux.yml's cache-save failure:
+# docker writes into ~/pywheels-cache/* as root, then a second, short
+# container (also root - needed, since only root can chown files it
+# doesn't own) chowns those bind-mounted host paths back to the runner
+# user before actions/cache tries to read them.
 #
-# Pulls the existing pywheels-alpine-builder image instead of building it,
-# so this finishes in well under a minute - no ~40-90min compile in the
-# loop. Also doubles as a check that the GHCR login/pull fix works, since
-# it exercises the identical login + pull.
+# Earlier version of this fix tried `docker run --user "$(id -u):$(id
+# -g)"` on the build container itself. That broke the build instead:
+# RUSTUP_HOME=/opt/rustup and CARGO_HOME=/opt/cargo are root-owned inside
+# the image (rustup/cargo were installed as root when the image was
+# built), so forcing the whole container to run as the host UID made
+# rustup unable to write its own temp files. This version leaves the
+# build container as root and only touches the host-visible bind mounts,
+# in a separate step, after the fact.
+#
+# Pulls the existing pywheels-alpine-builder image instead of building
+# it, so this finishes in well under a minute.
 
 on:
   workflow_dispatch:
@@ -37,14 +45,9 @@ jobs:
                    ~/pywheels-cache/cargo-target \
                    ~/pywheels-cache/sccache
 
-      # Same mounts and --user flag as the real workflow's "Run build.sh
-      # in container" step, but writes one throwaway file per mount
-      # instead of actually compiling anything.
-      - name: Write probe files as the container would during a real build
+      - name: Write probe files as root (as the real build container does)
         run: |
           docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp \
             -v ~/pywheels-cache/cargo-registry:/opt/cargo/registry \
             -v ~/pywheels-cache/cargo-git:/opt/cargo/git \
             -v ~/pywheels-cache/cargo-target:/cargo-target \
@@ -58,7 +61,21 @@ jobs:
               echo probe > /sccache/probe.txt
             '
 
-      - name: Verify probe files are owned by the runner user, not root
+      - name: Confirm probe files are currently root-owned (sanity check)
+        run: |
+          stat -c '%U %n' ~/pywheels-cache/cargo-registry/probe.txt
+
+      - name: Fix ownership (the actual fix)
+        run: |
+          docker run --rm \
+            -v ~/pywheels-cache/cargo-registry:/opt/cargo/registry \
+            -v ~/pywheels-cache/cargo-git:/opt/cargo/git \
+            -v ~/pywheels-cache/cargo-target:/cargo-target \
+            -v ~/pywheels-cache/sccache:/sccache \
+            "${IMAGE}:latest" \
+            chown -R "$(id -u):$(id -g)" /opt/cargo/registry /opt/cargo/git /cargo-target /sccache
+
+      - name: Verify probe files are now owned by the runner user
         run: |
           runner_uid="$(id -u)"
           fail=0
@@ -71,15 +88,14 @@ jobs:
             owner_uid="$(stat -c '%u' "$f")"
             echo "$f owned by uid $owner_uid (runner is $runner_uid)"
             if [ "$owner_uid" != "$runner_uid" ]; then
-              echo "::error::$f is root-owned - the --user fix isn't taking effect"
+              echo "::error::$f is still root-owned - the chown fix isn't working"
               fail=1
             fi
           done
           exit $fail
 
       # This is the exact step that failed with "Cannot open: Permission
-      # denied" / "Exiting with failure status due to previous errors" in
-      # the real run. If --user is working, this succeeds cleanly.
+      # denied" in the real run. If the chown above worked, this succeeds.
       - name: Cache save round trip (the step that failed before)
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
