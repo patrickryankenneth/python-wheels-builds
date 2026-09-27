@@ -21,10 +21,10 @@ on:
       - "recipes/dbt-oss/build.sh"
       - ".github/workflows/build-dbt-oss-musllinux.yml"
 
-# packages: read is required to pull the (private-by-default) GHCR image -
-# without it, `docker pull` on a private package returns "denied" even
-# with a correct tag, because an unauthenticated pull never even attempts
-# to use the token.
+# packages: read is belt-and-suspenders: the image is public so pulling
+# doesn't strictly require it, but a newly-published package on GHCR
+# defaults to private, so logging in keeps this workflow working even if
+# a future image/tag under this repo gets created private again.
 permissions:
   contents: read
   packages: read
@@ -65,9 +65,6 @@ jobs:
                    ~/pywheels-cache/sccache \
                    "${{ github.workspace }}/recipes/dbt-oss/dist"
 
-      # Was missing entirely before - this is why the pull below was
-      # returning "denied" on both the hash tag and :latest. Same login
-      # build-environment-image.yml already does before its push.
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
@@ -78,21 +75,21 @@ jobs:
           docker tag "${IMAGE}:${{ hashFiles('environments/alpine-3.20-musl/Containerfile') }}" pywheels-alpine-builder \
             || docker tag "${IMAGE}:latest" pywheels-alpine-builder
 
-      # --user pins the container's UID/GID to the host runner user, so
-      # everything it writes into the bind-mounted cache dirs is owned by
-      # that same user. Without this, the container's default root user
-      # owns those files, and the later `actions/cache` save step (which
-      # runs as the unprivileged runner user) gets Permission denied on
-      # every one of them - the save silently fails and nothing persists.
+      # No --user here on purpose: RUSTUP_HOME=/opt/rustup and
+      # CARGO_HOME=/opt/cargo are baked into the image as root-owned
+      # during the Containerfile build (rustup/cargo installed as root).
+      # Forcing the container to run as the host UID breaks its ability
+      # to write its own temp files there ("Permission denied" creating
+      # /opt/rustup/tmp/... - what just happened). Root inside the
+      # container is fine and expected; the problem was only ever about
+      # what gets left behind on the *host* side of the bind mounts.
       - name: Run build.sh in container
         run: |
           docker run --rm \
-            --user "$(id -u):$(id -g)" \
             -e RUSTFLAGS="--cap-lints=warn" \
             -e DBT_OSS_TAG="${DBT_OSS_TAG}" \
             -e PACKAGE_TARGETS="${PACKAGE_TARGETS}" \
             -e COLD_CACHE="${COLD_CACHE}" \
-            -e HOME=/tmp \
             -v ~/pywheels-cache/cargo-registry:/opt/cargo/registry \
             -v ~/pywheels-cache/cargo-git:/opt/cargo/git \
             -v ~/pywheels-cache/cargo-target:/cargo-target \
@@ -100,6 +97,26 @@ jobs:
             -v "${{ github.workspace }}/recipes/dbt-oss:/build" \
             pywheels-alpine-builder \
             sh /build/build.sh
+
+      # This is the actual fix for the original bug. The container above
+      # ran as root, so everything it wrote into the four bind-mounted
+      # host dirs is root-owned. This spins up one more container - also
+      # as root, deliberately - whose only job is chown, so the *host*
+      # copies of those paths end up owned by the runner user that the
+      # later actions/cache save step runs as. Runs even if the build
+      # step failed, so a failed build doesn't also throw away whatever
+      # cache progress it made (e.g. registry/index fetches) on top of
+      # the actual failure.
+      - name: Fix cache dir ownership for cache save
+        if: always()
+        run: |
+          docker run --rm \
+            -v ~/pywheels-cache/cargo-registry:/opt/cargo/registry \
+            -v ~/pywheels-cache/cargo-git:/opt/cargo/git \
+            -v ~/pywheels-cache/cargo-target:/cargo-target \
+            -v ~/pywheels-cache/sccache:/sccache \
+            pywheels-alpine-builder \
+            chown -R "$(id -u):$(id -g)" /opt/cargo/registry /opt/cargo/git /cargo-target /sccache
 
       - name: Upload wheels
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
