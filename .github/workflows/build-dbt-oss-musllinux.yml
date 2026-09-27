@@ -25,7 +25,7 @@ jobs:
       PACKAGE_TARGETS: ${{ inputs.package_targets || 'both' }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v5
 
       # Mirrors the local ~/.cache/pywheels-alpine bind mounts: cargo
       # registry/git index, the cargo target dir (fingerprints + build
@@ -34,7 +34,7 @@ jobs:
       # earlier LTO/codegen-units switch) correctly busts the cache instead
       # of silently reusing stale, incompatible fingerprints.
       - name: Cache cargo + sccache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/pywheels-cache/cargo-registry
@@ -82,14 +82,14 @@ jobs:
             sh /build/build.sh
 
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: dbt-wheels-musllinux-${{ env.DBT_OSS_TAG }}
           path: builder/workdir/dist/**/*.whl
           if-no-files-found: error
 
       - name: Upload cargo timing report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: cargo-timings-${{ env.DBT_OSS_TAG }}
