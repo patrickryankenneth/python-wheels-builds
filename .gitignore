@@ -20,6 +20,7 @@ build/
 
 # Ephemeral build artifacts (never tracked, never published)
 environments/*/*
+/builder
 !environments/*/Containerfile
 recipes/*/.work/
 recipes/*/dist/
