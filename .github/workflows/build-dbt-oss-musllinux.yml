@@ -4,9 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       dbt_oss_tag:
-        description: "dbt-oss tag to build"
+        description: "Upstream dbt-oss git tag to build from"
         required: true
         default: "v2.0.5"
+      release_tag:
+        description: >-
+          Tag to publish the release under (composable:
+          v<version>[-hardenedN][.postM]). Independent of dbt_oss_tag -
+          e.g. checking out upstream v2.0.5 but publishing v2.0.5.post1
+          when only the distribution bundle changed, not the upstream
+          commit.
+        required: true
+        default: "v2.0.5.post1"
       package_targets:
         description: "dbt-core, dbt-oss, or both"
         required: true
@@ -19,15 +28,28 @@ on:
     paths:
       - "environments/alpine-3.20-musl/Containerfile"
       - "recipes/dbt-oss/build.sh"
+      - ".github/scripts/checkout_verify.py"
       - ".github/workflows/build-dbt-oss-musllinux.yml"
 
 # packages: read is belt-and-suspenders: the image is public so pulling
 # doesn't strictly require it, but a newly-published package on GHCR
 # defaults to private, so logging in keeps this workflow working even if
 # a future image/tag under this repo gets created private again.
+# id-token/attestations: write are needed by the build job's attest steps.
 permissions:
   contents: read
   packages: read
+  id-token: write
+  attestations: write
+
+env:
+  UPSTREAM_PREDICATE: https://patrickryankenneth.github.io/attestations/upstream-source/v1
+  # Bump this whenever the checkout/build workflow's own hardening level
+  # changes. Recorded inside upstream-source.json by checkout_verify.py,
+  # so it's signed as part of the attestation - not just a label here.
+  # Kept identical to build-dbt-oss-win-arm64.yml's value since both
+  # platforms build the same upstream commit under the same policy today.
+  POLICY_VERSION: 2026-09-sha-pinned-v1
 
 jobs:
   build:
@@ -37,6 +59,9 @@ jobs:
       PACKAGE_TARGETS: ${{ inputs.package_targets || 'both' }}
       COLD_CACHE: ${{ inputs.cold_cache || '0' }}
       IMAGE: ghcr.io/${{ github.repository_owner }}/pywheels-alpine-builder
+    outputs:
+      tag: ${{ env.DBT_OSS_TAG }}
+      upstream_sha: ${{ steps.checkout_verify.outputs.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -83,6 +108,10 @@ jobs:
       # /opt/rustup/tmp/... - what just happened). Root inside the
       # container is fine and expected; the problem was only ever about
       # what gets left behind on the *host* side of the bind mounts.
+      #
+      # .github/scripts is bind-mounted read-only so build.sh can call
+      # checkout_verify.py without that script needing to live inside
+      # the image itself - keeps the image reusable across script changes.
       - name: Run build.sh in container
         run: |
           docker run --rm \
@@ -90,13 +119,24 @@ jobs:
             -e DBT_OSS_TAG="${DBT_OSS_TAG}" \
             -e PACKAGE_TARGETS="${PACKAGE_TARGETS}" \
             -e COLD_CACHE="${COLD_CACHE}" \
+            -e POLICY_VERSION="${{ env.POLICY_VERSION }}" \
             -v ~/pywheels-cache/cargo-registry:/opt/cargo/registry \
             -v ~/pywheels-cache/cargo-git:/opt/cargo/git \
             -v ~/pywheels-cache/cargo-target:/cargo-target \
             -v ~/pywheels-cache/sccache:/sccache \
             -v "${{ github.workspace }}/recipes/dbt-oss:/build" \
+            -v "${{ github.workspace }}/.github/scripts:/scripts:ro" \
             pywheels-alpine-builder \
             sh /build/build.sh
+
+      # build.sh (via checkout_verify.py) wrote plain KEY=VALUE lines to
+      # this file under the bind-mounted /build dir, which is why it's
+      # readable from the host here without reaching back into the
+      # container. Only runs if the previous step succeeded, so a build
+      # that failed never produces outputs for the release job to consume.
+      - name: Surface checkout-verify outputs
+        id: checkout_verify
+        run: cat "recipes/dbt-oss/checkout-verify-outputs.env" >> "$GITHUB_OUTPUT"
 
       # This is the actual fix for the original bug. The container above
       # ran as root, so everything it wrote into the four bind-mounted
@@ -125,6 +165,13 @@ jobs:
           path: recipes/dbt-oss/dist/**/*.whl
           if-no-files-found: error
 
+      - name: Upload source archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dbt-source-archive-musllinux-${{ env.DBT_OSS_TAG }}
+          path: recipes/dbt-oss/source-archive/*.tar.gz
+          if-no-files-found: error
+
       - name: Upload cargo timing report
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
@@ -132,3 +179,58 @@ jobs:
           name: cargo-timings-${{ env.DBT_OSS_TAG }}
           path: ~/pywheels-cache/cargo-target/cargo-timings/*.html
           if-no-files-found: ignore
+
+      # Each dist/<name>/ folder holds exactly one wheel, so these are
+      # attested individually - one single-subject attestation per wheel,
+      # instead of one glob covering both (which GitHub Actions treats as
+      # a single multi-subject attestation, not two separate ones).
+      # Mirrors build-dbt-oss-win-arm64.yml's attest steps; paths are
+      # prefixed with recipes/dbt-oss/ here since that's where the bind
+      # mount puts dist/ and upstream-source.json, unlike win-arm64 where
+      # the upstream repo is checked out directly at the workspace root.
+      - name: Attest build provenance (dbt-core)
+        if: hashFiles('recipes/dbt-oss/dist/dbt-core/*.whl') != ''
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: recipes/dbt-oss/dist/dbt-core/*.whl
+
+      - name: Attest upstream source (dbt-core)
+        if: hashFiles('recipes/dbt-oss/dist/dbt-core/*.whl') != ''
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: recipes/dbt-oss/dist/dbt-core/*.whl
+          predicate-type: ${{ env.UPSTREAM_PREDICATE }}
+          predicate-path: recipes/dbt-oss/upstream-source.json
+
+      - name: Attest build provenance (dbt-oss)
+        if: hashFiles('recipes/dbt-oss/dist/dbt-oss/*.whl') != ''
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: recipes/dbt-oss/dist/dbt-oss/*.whl
+
+      - name: Attest upstream source (dbt-oss)
+        if: hashFiles('recipes/dbt-oss/dist/dbt-oss/*.whl') != ''
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: recipes/dbt-oss/dist/dbt-oss/*.whl
+          predicate-type: ${{ env.UPSTREAM_PREDICATE }}
+          predicate-path: recipes/dbt-oss/upstream-source.json
+
+  # Only runs for a deliberate workflow_dispatch run, not the push-trigger
+  # smoke rebuilds above (Containerfile/build.sh/script changes) - those
+  # shouldn't silently attempt a release.
+  release:
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/_verify-and-release.yml
+    permissions:
+      contents: write
+      attestations: read
+      actions: read
+    with:
+      tag: ${{ inputs.release_tag || 'v2.0.5.post1' }}
+      upstream_sha: ${{ needs.build.outputs.upstream_sha }}
+      wheel_artifact_name: dbt-wheels-musllinux-${{ needs.build.outputs.tag }}
+      source_archive_artifact_name: dbt-source-archive-musllinux-${{ needs.build.outputs.tag }}
+      signer_workflow: ${{ github.repository }}/.github/workflows/build-dbt-oss-musllinux.yml
+      dry_run: true

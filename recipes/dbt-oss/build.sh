@@ -1,12 +1,16 @@
 #!/bin/sh
 # Run INSIDE the pywheels-alpine-builder container, cwd /build.
-# Mirrors build-dbt-oss-win-arm64.yml's build steps (resolve tag -> clone
-# at pinned commit -> verify clean -> per-target maturin build), minus
-# attestation/release since this is the local pre-CI validation pass.
+# Checkout, pinned-commit verification, source archiving, and the
+# upstream-source.json predicate now live in checkout_verify.py
+# (bind-mounted read-only at /scripts) instead of being duplicated here -
+# that script is written to be reusable across platforms/packages, not
+# musllinux/dbt-oss specific. This file is left as just the maturin build
+# loop, mirroring build-dbt-oss-win-arm64.yml's build steps.
 set -eu
 
 DBT_OSS_TAG="${DBT_OSS_TAG:-v2.0.5}"
 PACKAGE_TARGETS="${PACKAGE_TARGETS:-both}"
+POLICY_VERSION="${POLICY_VERSION:?POLICY_VERSION must be set}"
 REPO_URL="https://github.com/dbt-labs/dbt-oss.git"
 
 if ! command -v protoc >/dev/null 2>&1; then
@@ -15,39 +19,19 @@ if ! command -v protoc >/dev/null 2>&1; then
 fi
 echo "protoc: $(protoc --version)"
 
-echo "== Resolving $DBT_OSS_TAG on $REPO_URL =="
-line=$(git ls-remote "$REPO_URL" "refs/tags/${DBT_OSS_TAG}^{}") || true
-if [ -z "$line" ]; then
-    line=$(git ls-remote "$REPO_URL" "refs/tags/${DBT_OSS_TAG}")
-fi
-if [ -z "$line" ]; then
-    echo "Tag $DBT_OSS_TAG not found in $REPO_URL" >&2
-    exit 1
-fi
-SHA=$(printf '%s' "$line" | head -n1 | cut -f1)
-echo "Tag $DBT_OSS_TAG resolves to $SHA"
+echo "== Resolving, checking out, and verifying $DBT_OSS_TAG on $REPO_URL =="
+python3 /scripts/checkout_verify.py \
+    --repo-url "$REPO_URL" \
+    --tag "$DBT_OSS_TAG" \
+    --clone-dir dbt-oss \
+    --archive-dir source-archive \
+    --predicate-path upstream-source.json \
+    --outputs-file checkout-verify-outputs.env \
+    --policy-version "$POLICY_VERSION"
 
-if [ ! -d dbt-oss ]; then
-    git clone "$REPO_URL" dbt-oss
-fi
-
-if git -C dbt-oss cat-file -e "${SHA}^{commit}" 2>/dev/null; then
-    echo "Commit $SHA already present locally - skipping fetch"
-else
-    git -C dbt-oss fetch origin "$SHA"
-fi
-git -C dbt-oss checkout --detach "$SHA"
-
-head=$(git -C dbt-oss rev-parse HEAD)
-if [ "$head" != "$SHA" ]; then
-    echo "HEAD $head != expected $SHA" >&2
-    exit 1
-fi
-if [ -n "$(git -C dbt-oss status --porcelain)" ]; then
-    echo "Working tree is not clean" >&2
-    exit 1
-fi
-echo "Checkout verified: $head"
+# checkout_verify.py wrote plain KEY=VALUE lines - safe to source directly.
+. ./checkout-verify-outputs.env
+echo "Resolved commit: $sha"
 
 cd dbt-oss/crates/dbt-sa-python
 PYPROJECT="$(pwd)/pyproject.toml"
@@ -133,4 +117,4 @@ if ! git -C ../.. diff --quiet HEAD; then
     echo "Build modified tracked source files" >&2
     exit 1
 fi
-echo "Source tree unmodified: $head"
+echo "Source tree unmodified: $sha"
