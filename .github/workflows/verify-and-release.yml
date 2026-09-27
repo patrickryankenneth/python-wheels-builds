@@ -1,0 +1,198 @@
+name: _verify-and-release
+
+# Shared release module. Called via `uses:` from any build workflow's
+# `release:` job (win-arm64 today; musllinux and future targets once they
+# adopt it). This is the thing whose hardening level gets versioned - bump
+# POLICY_VERSION below as verification gets more complex, and every caller
+# picks it up automatically just by pointing at a newer commit SHA of this
+# file, without needing to change anything in their own workflow.
+#
+# dry_run: true runs the exact same draft-upload-verify sequence as a real
+# release, then deletes the draft instead of publishing. This is what lets
+# a smoke test exercise the *actual* release logic - not a hand-copied
+# stand-in of it - without ever creating something that immutability rules
+# would stop you from cleaning up.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v2.0.5 or smoke-<run_id>"
+        required: true
+        type: string
+      upstream_sha:
+        required: true
+        type: string
+      wheel_artifact_name:
+        required: true
+        type: string
+      source_archive_artifact_name:
+        required: true
+        type: string
+      signer_workflow:
+        description: "[host/]<owner>/<repo>/<path>/<to>/<workflow> of the calling build workflow"
+        required: true
+        type: string
+      release_title_prefix:
+        default: "dbt-oss"
+        type: string
+      upstream_predicate:
+        default: "https://patrickryankenneth.github.io/attestations/upstream-source/v1"
+        type: string
+      dry_run:
+        description: "If true, verify everything then delete the draft instead of publishing"
+        default: false
+        type: boolean
+    outputs:
+      release_url:
+        description: "URL of the published release (empty in dry-run mode)"
+        value: ${{ jobs.release.outputs.release_url }}
+
+env:
+  POLICY_VERSION: 2026-09-sha-pinned-v1
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      attestations: read
+      actions: read
+    outputs:
+      release_url: ${{ steps.publish.outputs.release_url }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag }}
+      SHA: ${{ inputs.upstream_sha }}
+      UPSTREAM_PREDICATE: ${{ inputs.upstream_predicate }}
+      SIGNER_WORKFLOW: ${{ inputs.signer_workflow }}
+      REL: ${{ inputs.release_title_prefix }}-${{ inputs.tag }}
+    steps:
+      - name: Download wheel artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ inputs.wheel_artifact_name }}
+          path: dist
+
+      - name: List downloaded wheels
+        run: find dist -name '*.whl'
+
+      - name: Download source archive artifact into release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ inputs.source_archive_artifact_name }}
+          path: release-assets
+
+      # Fetches THIS run's own build job log, not the caller's - safe
+      # because this job only starts once the caller's `needs: build` (or
+      # equivalent) has finished, so the log is complete and fetchable.
+      - name: Fetch build job log
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          job_id=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" \
+            --jq '.jobs[] | select(.name=="build") | .id')
+          if [ -z "$job_id" ]; then
+            echo "::error::could not find a job named 'build' in this run"
+            exit 1
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/actions/jobs/${job_id}/logs" --allow-escape-sequences > build-log.txt
+          gzip -9 build-log.txt
+          mv build-log.txt.gz "release-assets/build-log-${TAG}.txt.gz"
+          echo "Saved build log for job $job_id"
+
+      - name: Verify attestations and save bundles
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          find dist -name '*.whl' -print0 | while IFS= read -r -d '' wheel; do
+            base=$(basename "$wheel")
+            echo "== $base =="
+            cp "$wheel" "release-assets/$base"
+
+            gh attestation verify "$wheel" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$SIGNER_WORKFLOW"
+            gh attestation verify "$wheel" --repo "$GITHUB_REPOSITORY" \
+              --predicate-type "$UPSTREAM_PREDICATE" \
+              --signer-workflow "$SIGNER_WORKFLOW"
+
+            digest="sha256:$(sha256sum "$wheel" | cut -d' ' -f1)"
+            gh attestation download "$wheel" --repo "$GITHUB_REPOSITORY" >/dev/null
+
+            bundle="${digest}.jsonl"
+            if [ ! -f "$bundle" ]; then
+              echo "::error::expected attestation bundle $bundle not found for $base"
+              exit 1
+            fi
+            mv "$bundle" "release-assets/$base.attestations.jsonl"
+          done
+          echo "== release-assets =="
+          ls -la release-assets
+
+      - name: Sanity-check bundles are actually distinct
+        run: |
+          cd release-assets
+          n_wheels=$(ls -1 *.whl | wc -l)
+          n_unique_bundles=$(sha256sum *.attestations.jsonl | awk '{print $1}' | sort -u | wc -l)
+          echo "wheels: $n_wheels, unique bundle hashes: $n_unique_bundles"
+          if [ "$n_wheels" -gt 1 ] && [ "$n_unique_bundles" -lt "$n_wheels" ]; then
+            echo "::error::attestation bundles are not unique per wheel - refusing to proceed"
+            exit 1
+          fi
+
+      # Same transactional shape either way: draft -> upload -> verify ->
+      # (publish | delete). dry_run only changes the last step. Nothing
+      # public exists until that last step runs, so a dry run is provably
+      # identical to a real release right up until the point it diverges.
+      - name: Create draft and upload
+        run: |
+          set -euo pipefail
+          expected=$(cd release-assets && ls -1 | sort)
+          echo "expected=$expected" >> "$GITHUB_ENV"
+
+          if gh release view "$REL" --repo "$GITHUB_REPOSITORY" \
+               --json isDraft,assets > /tmp/rel.json 2>/dev/null; then
+            isDraft=$(jq -r '.isDraft' /tmp/rel.json)
+            existing=$(jq -r '.assets[].name' /tmp/rel.json | sort)
+
+            if [ "$isDraft" = "false" ]; then
+              if [ "$existing" = "$expected" ]; then
+                echo "Release $REL is already published with these exact assets - nothing to do"
+                echo "SKIP_PUBLISH=1" >> "$GITHUB_ENV"
+                exit 0
+              fi
+              echo "::error::Published release $REL already exists with a different asset set - refusing to overwrite"
+              exit 1
+            fi
+            echo "Resuming incomplete draft release $REL (not yet public)"
+          else
+            title_prefix="${{ inputs.dry_run && 'DRY RUN -' || '' }}"
+            gh release create "$REL" --repo "$GITHUB_REPOSITORY" --draft ${{ inputs.dry_run && '--prerelease' || '' }} \
+              --title "$title_prefix ${{ inputs.release_title_prefix }} ${TAG}" \
+              --notes "Built from commit ${SHA} (tag ${TAG}). Verify with: gh attestation verify <wheel> --repo ${GITHUB_REPOSITORY} --signer-workflow ${SIGNER_WORKFLOW}"
+          fi
+
+          gh release upload "$REL" --repo "$GITHUB_REPOSITORY" --clobber release-assets/*
+
+          final=$(gh release view "$REL" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | sort)
+          if [ "$final" != "$expected" ]; then
+            echo "::error::Uploaded asset set does not match expected set - not publishing"
+            exit 1
+          fi
+
+      - name: Publish (real releases only)
+        id: publish
+        if: ${{ !inputs.dry_run && env.SKIP_PUBLISH != '1' }}
+        run: |
+          gh release edit "$REL" --repo "$GITHUB_REPOSITORY" --draft=false
+          url=$(gh release view "$REL" --repo "$GITHUB_REPOSITORY" --json url --jq '.url')
+          echo "release_url=$url" >> "$GITHUB_OUTPUT"
+          echo "Published $REL"
+
+      # Dry run's whole point: prove the release would have succeeded,
+      # then leave nothing behind. Also cleans up on failure so a broken
+      # dry run doesn't leak a half-finished draft either.
+      - name: Delete draft (dry run only, or on failure)
+        if: ${{ inputs.dry_run || failure() }}
+        run: |
+          gh release delete "$REL" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
