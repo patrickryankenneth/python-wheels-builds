@@ -1,0 +1,43 @@
+name: build-environment-image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "environments/alpine-3.20-musl/Containerfile"
+      - ".github/workflows/build-environment-image.yml"
+  workflow_dispatch: {}
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/pywheels-alpine-builder
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Compute content-addressed tag
+        id: tag
+        run: echo "hash=${{ hashFiles('environments/alpine-3.20-musl/Containerfile') }}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build
+        run: |
+          docker build \
+            -f environments/alpine-3.20-musl/Containerfile \
+            -t "${IMAGE}:${{ steps.tag.outputs.hash }}" \
+            -t "${IMAGE}:latest" \
+            environments/alpine-3.20-musl/
+
+      - name: Push
+        run: |
+          docker push "${IMAGE}:${{ steps.tag.outputs.hash }}"
+          docker push "${IMAGE}:latest"
