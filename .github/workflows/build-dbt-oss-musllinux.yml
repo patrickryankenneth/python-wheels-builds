@@ -14,7 +14,7 @@ on:
       cold_cache:
         description: "Allow network / lockfile updates (first run after a cache reset)"
         required: true
-        default: "false"
+        default: "0"
   push:
     paths:
       - "environments/alpine-3.20-musl/Containerfile"
@@ -27,7 +27,7 @@ jobs:
     env:
       DBT_OSS_TAG: ${{ inputs.dbt_oss_tag || 'v2.0.5' }}
       PACKAGE_TARGETS: ${{ inputs.package_targets || 'both' }}
-      COLD_CACHE: ${{ inputs.cold_cache || 'false' }}
+      COLD_CACHE: ${{ inputs.cold_cache || '0' }}
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -79,8 +79,6 @@ jobs:
             -e DBT_OSS_TAG="${DBT_OSS_TAG}" \
             -e PACKAGE_TARGETS="${PACKAGE_TARGETS}" \
             -e COLD_CACHE="${COLD_CACHE}" \
-            -e DBT_OSS_TAG="${DBT_OSS_TAG}" \
-            -e PACKAGE_TARGETS="${PACKAGE_TARGETS}" \
             -v ~/pywheels-cache/cargo-registry:/opt/cargo/registry \
             -v ~/pywheels-cache/cargo-git:/opt/cargo/git \
             -v ~/pywheels-cache/cargo-target:/cargo-target \
