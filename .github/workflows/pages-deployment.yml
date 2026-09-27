@@ -31,11 +31,15 @@ jobs:
           python-version: "3.x"
 
       - name: Convert README.md to HTML
+        env:
+          REPO_NAME: ${{ github.repository }}
         run: |
           pip install markdown
           python3 - << 'EOF'
           import os
           import markdown
+
+          repo_name = os.environ.get("REPO_NAME", "Repository")
 
           with open("README.md", "r", encoding="utf-8") as f:
               content = f.read()
@@ -47,7 +51,7 @@ jobs:
           <head>
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>README</title>
+            <title>{repo_name}</title>
             <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/github-markdown-css/5.8.1/github-markdown.min.css">
             <style>
               body {{
@@ -77,8 +81,9 @@ jobs:
 
           touch _site/.nojekyll
 
+      # Uses v4.0.0 where internal actions/upload-artifact is pinned to a full commit SHA
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4.0.0
         with:
           path: _site
 
