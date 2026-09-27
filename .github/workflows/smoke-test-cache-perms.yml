@@ -1,0 +1,91 @@
+name: smoke-test-cache-perms
+
+# Isolates the exact failure from build-dbt-oss-musllinux.yml's last run:
+# docker writing into ~/pywheels-cache/* as root, then actions/cache's
+# save step (running as the unprivileged runner user) getting Permission
+# denied trying to read those files back out to pack cache.tzst.
+#
+# Pulls the existing pywheels-alpine-builder image instead of building it,
+# so this finishes in well under a minute - no ~40-90min compile in the
+# loop. Also doubles as a check that the GHCR login/pull fix works, since
+# it exercises the identical login + pull.
+
+on:
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/pywheels-alpine-builder
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Pull builder image
+        run: docker pull "${IMAGE}:latest"
+
+      - name: Prepare cache dirs
+        run: |
+          mkdir -p ~/pywheels-cache/cargo-registry \
+                   ~/pywheels-cache/cargo-git \
+                   ~/pywheels-cache/cargo-target \
+                   ~/pywheels-cache/sccache
+
+      # Same mounts and --user flag as the real workflow's "Run build.sh
+      # in container" step, but writes one throwaway file per mount
+      # instead of actually compiling anything.
+      - name: Write probe files as the container would during a real build
+        run: |
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -v ~/pywheels-cache/cargo-registry:/opt/cargo/registry \
+            -v ~/pywheels-cache/cargo-git:/opt/cargo/git \
+            -v ~/pywheels-cache/cargo-target:/cargo-target \
+            -v ~/pywheels-cache/sccache:/sccache \
+            "${IMAGE}:latest" \
+            sh -c '
+              id
+              echo probe > /opt/cargo/registry/probe.txt
+              echo probe > /opt/cargo/git/probe.txt
+              echo probe > /cargo-target/probe.txt
+              echo probe > /sccache/probe.txt
+            '
+
+      - name: Verify probe files are owned by the runner user, not root
+        run: |
+          runner_uid="$(id -u)"
+          fail=0
+          for f in \
+            ~/pywheels-cache/cargo-registry/probe.txt \
+            ~/pywheels-cache/cargo-git/probe.txt \
+            ~/pywheels-cache/cargo-target/probe.txt \
+            ~/pywheels-cache/sccache/probe.txt
+          do
+            owner_uid="$(stat -c '%u' "$f")"
+            echo "$f owned by uid $owner_uid (runner is $runner_uid)"
+            if [ "$owner_uid" != "$runner_uid" ]; then
+              echo "::error::$f is root-owned - the --user fix isn't taking effect"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      # This is the exact step that failed with "Cannot open: Permission
+      # denied" / "Exiting with failure status due to previous errors" in
+      # the real run. If --user is working, this succeeds cleanly.
+      - name: Cache save round trip (the step that failed before)
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/pywheels-cache/cargo-registry
+            ~/pywheels-cache/cargo-git
+            ~/pywheels-cache/cargo-target
+            ~/pywheels-cache/sccache
+          key: smoke-cache-perms-${{ github.run_id }}
