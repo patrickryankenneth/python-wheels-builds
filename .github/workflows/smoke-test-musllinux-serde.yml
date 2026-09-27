@@ -1,0 +1,135 @@
+name: smoke-test-musllinux-serde
+
+# Two things this proves that smoke-test-cache-perms.yml didn't:
+#  1. sccache's on-disk cache (SCCACHE_DIR=/sccache, baked into the image)
+#     is actually being hit, not just configured and silently missing
+#     every time - build once, wipe $CARGO_TARGET_DIR, build again, and
+#     assert the second build reports cache hits > 0.
+#  2. The chown-based ownership fix holds up against a real dependency
+#     tree, not one echo'd probe file. serde + derive pulls in syn, quote,
+#     proc-macro2, unicode-ident - real crates with real file counts and
+#     structures, much closer to what dbt-oss's build actually stresses.
+#
+# Pulls the existing image rather than building it - this finishes in
+# well under 2 minutes even on a cold cache.
+
+on:
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/pywheels-alpine-builder
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Pull builder image
+        run: docker pull "${IMAGE}:latest"
+
+      - name: Cache cargo + sccache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/pywheels-cache/cargo-registry
+            ~/pywheels-cache/cargo-git
+            ~/pywheels-cache/cargo-target
+            ~/pywheels-cache/sccache
+          key: smoke-musllinux-serde-${{ hashFiles('environments/alpine-3.20-musl/Containerfile') }}
+          restore-keys: |
+            smoke-musllinux-serde-
+
+      - name: Prepare cache dirs
+        run: |
+          mkdir -p ~/pywheels-cache/cargo-registry \
+                   ~/pywheels-cache/cargo-git \
+                   ~/pywheels-cache/cargo-target \
+                   ~/pywheels-cache/sccache
+
+      # Written as a script file and bind-mounted in, rather than an
+      # inline `docker run ... sh -c '...'` with nested heredocs - a
+      # single mounted file is far easier to read and edit than trying to
+      # nest quoting inside quoting inside YAML.
+      - name: Write serde probe script
+        run: |
+          cat > serde-probe.sh << 'EOF'
+          #!/bin/sh
+          set -eu
+          mkdir -p /tmp/serde-probe/src
+          cd /tmp/serde-probe
+
+          cat > Cargo.toml << 'INNER'
+          [package]
+          name = "serde-probe"
+          version = "0.1.0"
+          edition = "2021"
+
+          [dependencies]
+          serde = { version = "1", features = ["derive"] }
+          serde_json = "1"
+          INNER
+
+          cat > src/lib.rs << 'INNER'
+          use serde::{Serialize, Deserialize};
+
+          #[derive(Serialize, Deserialize, Debug)]
+          pub struct Probe { pub value: u32 }
+
+          pub fn roundtrip() -> bool {
+              let p = Probe { value: 42 };
+              let json = serde_json::to_string(&p).unwrap();
+              let back: Probe = serde_json::from_str(&json).unwrap();
+              back.value == 42
+          }
+          INNER
+
+          echo "== cold build (expect mostly cache misses) =="
+          cargo build --release
+          sccache --show-stats
+
+          echo "== clearing \$CARGO_TARGET_DIR, rebuilding (expect cache hits) =="
+          rm -rf "$CARGO_TARGET_DIR"
+          cargo build --release
+
+          echo "-- stats after rebuild --"
+          sccache --show-stats
+
+          hits=$(sccache --show-stats | awk '/Cache hits/ { print $NF; exit }')
+          echo "cache hits after rebuild: ${hits:-0}"
+          if [ "${hits:-0}" -le 0 ]; then
+            echo "sccache reported zero cache hits on rebuild - cache is not being reused" >&2
+            exit 1
+          fi
+          EOF
+          chmod +x serde-probe.sh
+
+      - name: Build serde crate cold, then rebuild to prove sccache reuse
+        run: |
+          docker run --rm \
+            -v ~/pywheels-cache/cargo-registry:/opt/cargo/registry \
+            -v ~/pywheels-cache/cargo-git:/opt/cargo/git \
+            -v ~/pywheels-cache/cargo-target:/cargo-target \
+            -v ~/pywheels-cache/sccache:/sccache \
+            -v "${{ github.workspace }}/serde-probe.sh:/serde-probe.sh:ro" \
+            "${IMAGE}:latest" \
+            sh /serde-probe.sh
+
+      # Same fix as the real build workflow - the container above ran as
+      # root, so this chowns the host-visible bind mounts back to the
+      # runner user before actions/cache tries to read them.
+      - name: Fix cache dir ownership for cache save
+        if: always()
+        run: |
+          docker run --rm \
+            -v ~/pywheels-cache/cargo-registry:/opt/cargo/registry \
+            -v ~/pywheels-cache/cargo-git:/opt/cargo/git \
+            -v ~/pywheels-cache/cargo-target:/cargo-target \
+            -v ~/pywheels-cache/sccache:/sccache \
+            "${IMAGE}:latest" \
+            chown -R "$(id -u):$(id -g)" /opt/cargo/registry /opt/cargo/git /cargo-target /sccache
