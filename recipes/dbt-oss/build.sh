@@ -82,7 +82,28 @@ for name in $targets; do
     # --timings writes per-crate compile duration + concurrency data
     # to $CARGO_TARGET_DIR/cargo-timings/ - use this to see how long each
     # crate actually took instead of guessing from scrollback.
-    maturin build --release "$FROZEN_FLAG" --timings
+    #
+    # Instrumentation: CARGO_LOG (set by the workflow) makes cargo log why
+    # each unit is dirty. Full output goes to build-logs/<name>.log (also
+    # uploaded as an artifact); a filtered summary + per-package sccache
+    # stats are printed right after. POSIX sh has no pipefail, so maturin's
+    # exit code is captured via a side file instead of the pipeline status.
+    mkdir -p /build/build-logs
+    LOG="/build/build-logs/$name.log"
+    sccache --zero-stats
+    set +e
+    { maturin build --release "$FROZEN_FLAG" --timings; echo $? > "$LOG.rc"; } 2>&1 | tee "$LOG"
+    set -e
+    rc=$(cat "$LOG.rc")
+    echo "== [$name] fingerprint summary =="
+    echo "dirty/stale lines: $(grep -cE 'dirty|stale' "$LOG" || true)"
+    grep -E 'dirty|stale' "$LOG" | head -40 || true
+    echo "== [$name] sccache stats =="
+    sccache --show-stats || true
+    if [ "$rc" -ne 0 ]; then
+        echo "maturin build failed for $name (exit $rc)" >&2
+        exit "$rc"
+    fi
 
     wheel_count=$(find "$WHEELS_DIR" -maxdepth 1 -name '*.whl' | wc -l)
     if [ "$wheel_count" -ne 1 ]; then
