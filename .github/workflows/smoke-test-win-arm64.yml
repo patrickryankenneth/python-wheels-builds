@@ -13,7 +13,7 @@ jobs:
   probe:
     runs-on: windows-11-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: System info
         shell: pwsh
@@ -22,10 +22,10 @@ jobs:
           $env:PROCESSOR_ARCHITECTURE
 
       - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
 
       - name: Install sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
+        uses: mozilla-actions/sccache-action@9e326ebed976843c9932b3aa0e021c6f50310eb4 # v0.0.6
 
       # Resilience: sccache's GHA cache backend can have transient outages
       # (seen: "Our services aren't available right now" / HTTP 400 from
