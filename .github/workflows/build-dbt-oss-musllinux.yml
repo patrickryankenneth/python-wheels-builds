@@ -111,6 +111,7 @@ jobs:
         run: |
           docker run --rm \
             -e RUSTFLAGS="--cap-lints=warn" \
+            -e CARGO_LOG="cargo::core::compiler::fingerprint=info" \
             -e DBT_OSS_TAG="${DBT_OSS_TAG}" \
             -e PACKAGE_TARGETS="${PACKAGE_TARGETS}" \
             -e COLD_CACHE="${COLD_CACHE}" \
@@ -166,6 +167,14 @@ jobs:
           name: dbt-source-archive-musllinux-${{ env.DBT_OSS_TAG }}
           path: recipes/dbt-oss/source-archive/*.tar.gz
           if-no-files-found: error
+
+      - name: Upload build logs (fingerprint + sccache diagnostics)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: build-logs-${{ env.DBT_OSS_TAG }}
+          path: recipes/dbt-oss/build-logs/*.log
+          if-no-files-found: ignore
 
       - name: Upload cargo timing report
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
