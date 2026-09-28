@@ -7,15 +7,6 @@ on:
         description: "Upstream dbt-oss git tag to build from"
         required: true
         default: "v2.0.5"
-      release_tag:
-        description: >-
-          Tag to publish the release under (composable:
-          v<version>[-hardenedN][.postM]). Independent of dbt_oss_tag -
-          e.g. checking out upstream v2.0.5 but publishing v2.0.5.post1
-          when only the distribution bundle changed, not the upstream
-          commit.
-        required: true
-        default: "v2.0.5.post1"
       package_targets:
         description: "dbt-core, dbt-oss, or both"
         required: true
@@ -24,6 +15,10 @@ on:
         description: "Allow network / lockfile updates (first run after a cache reset)"
         required: true
         default: "0"
+      dry_run:
+        description: "Verify the whole release end-to-end, then delete the draft instead of publishing. Leave OFF to publish for real."
+        type: boolean
+        default: false
   push:
     paths:
       - "environments/alpine-3.20-musl/Containerfile"
@@ -228,9 +223,8 @@ jobs:
       attestations: read
       actions: read
     with:
-      tag: ${{ inputs.release_tag || 'v2.0.5.post1' }}
       upstream_sha: ${{ needs.build.outputs.upstream_sha }}
       wheel_artifact_name: dbt-wheels-musllinux-${{ needs.build.outputs.tag }}
       source_archive_artifact_name: dbt-source-archive-musllinux-${{ needs.build.outputs.tag }}
       signer_workflow: ${{ github.repository }}/.github/workflows/build-dbt-oss-musllinux.yml
-      dry_run: true
+      dry_run: ${{ inputs.dry_run }}
