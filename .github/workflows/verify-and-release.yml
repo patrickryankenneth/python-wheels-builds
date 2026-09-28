@@ -38,6 +38,10 @@ on:
       upstream_predicate:
         default: "https://patrickryankenneth.github.io/attestations/upstream-source/v1"
         type: string
+      force_new_post:
+        description: "If true, publish under the next free .postN even when a published release already has these exact wheel names (e.g. re-released with stronger attestations)"
+        default: false
+        type: boolean
       dry_run:
         description: "If true, verify everything end-to-end then delete the draft instead of publishing"
         default: false
@@ -104,4 +108,5 @@ jobs:
             --upstream-predicate "${{ inputs.upstream_predicate }}" \
             --release-title-prefix "${{ inputs.release_title_prefix }}" \
             ${{ inputs.tag && format('--tag {0}', inputs.tag) || '' }} \
+            ${{ inputs.force_new_post && '--force-new-post' || '' }} \
             ${{ inputs.dry_run && '--dry-run' || '' }}
