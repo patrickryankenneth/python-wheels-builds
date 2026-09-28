@@ -10,8 +10,9 @@ on:
   workflow_call:
     inputs:
       tag:
-        description: "Upstream tag, e.g. v2.0.5 or smoke-<run_id>"
-        required: true
+        description: "Explicit release tag override (e.g. smoke-<run_id>). Leave empty: derived from the wheels' version, with .postN appended only when a release for that version already exists"
+        required: false
+        default: ""
         type: string
       upstream_sha:
         required: true
@@ -40,6 +41,9 @@ on:
       release_url:
         description: "URL of the published release (empty in dry-run mode)"
         value: ${{ jobs.release.outputs.release_url }}
+      release_tag:
+        description: "Tag the release was (or would have been, in dry-run) published under"
+        value: ${{ jobs.release.outputs.release_tag }}
 
 env:
   POLICY_VERSION: 2026-09-sha-pinned-v1
@@ -53,6 +57,7 @@ jobs:
       actions: read
     outputs:
       release_url: ${{ steps.run.outputs.release_url }}
+      release_tag: ${{ steps.run.outputs.release_tag }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -88,9 +93,9 @@ jobs:
         run: |
           python3 .github/scripts/release_manager.py \
             --repo "${{ github.repository }}" \
-            --tag "${{ inputs.tag }}" \
             --sha "${{ inputs.upstream_sha }}" \
             --signer-workflow "${{ inputs.signer_workflow }}" \
             --upstream-predicate "${{ inputs.upstream_predicate }}" \
             --release-title-prefix "${{ inputs.release_title_prefix }}" \
+            ${{ inputs.tag && format('--tag {0}', inputs.tag) || '' }} \
             ${{ inputs.dry_run && '--dry-run' || '' }}
