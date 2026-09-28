@@ -19,6 +19,7 @@ this is a real end-to-end test of the release transaction, not a stand-in
 for it.
 """
 import argparse
+import email.parser
 import gzip
 import hashlib
 import json
@@ -26,6 +27,7 @@ import os
 import shutil
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 
@@ -95,6 +97,68 @@ def verify_attestations(wheel_dir: Path, assets_dir: Path, repo: str,
             print(f"::error::expected attestation bundle {bundle} not found for {base}")
             sys.exit(1)
         bundle.rename(assets_dir / f"{base}.attestations.jsonl")
+
+
+def wheel_version(wheel: Path) -> str:
+    """Version: field from the wheel's own *.dist-info/METADATA - exactly
+    what pip will see, and the only authoritative source (pyproject.toml
+    may not carry it at all, e.g. maturin reading it from Cargo.toml)."""
+    with zipfile.ZipFile(wheel) as z:
+        meta = next((n for n in z.namelist()
+                     if n.count("/") == 1 and n.endswith(".dist-info/METADATA")), None)
+        if meta is None:
+            print(f"::error::no .dist-info/METADATA in {wheel.name}")
+            sys.exit(1)
+        msg = email.parser.Parser().parsestr(z.read(meta).decode("utf-8"), headersonly=True)
+    version = msg["Version"]
+    if not version:
+        print(f"::error::no Version field in METADATA of {wheel.name}")
+        sys.exit(1)
+    return version.strip()
+
+
+def derive_version(wheel_dir: Path) -> str:
+    versions = {wheel_version(w) for w in sorted(wheel_dir.rglob("*.whl"))}
+    if len(versions) != 1:
+        print(f"::error::wheels in {wheel_dir} do not agree on one version: {sorted(versions)}")
+        sys.exit(1)
+    return versions.pop()
+
+
+def choose_tag(repo: str, prefix: str, version: str, wheel_names: set[str]) -> tuple[str, bool]:
+    """
+    First release for an upstream version gets `v<version>`; any later
+    release for it gets `.post1`, `.post2`, ... regardless of why (more
+    wheels, security fix, anything) - a published release is immutable, so
+    a new tag is the only way to change what's released.
+
+    The version text is taken verbatim from the wheel and our suffix is
+    appended to it as a plain label. It is never parsed back out of a tag,
+    and if the label is already taken by a release with a different wheel
+    set, we simply move to the next one.
+
+    Returns (tag, already_released). already_released means a published
+    release under that tag already has exactly these wheels: nothing to do.
+    """
+    n = 0
+    while True:
+        tag = f"v{version}" + (f".post{n}" if n else "")
+        rel = f"{prefix}-{tag}"
+        view = run_cmd(["gh", "release", "view", rel, "--repo", repo,
+                        "--json", "isDraft,assets"], check=False)
+        if view.returncode != 0:
+            if "not found" not in view.stderr.lower():
+                print(f"::error::could not look up release {rel}")
+                sys.exit(view.returncode)
+            return tag, False
+        info = json.loads(view.stdout)
+        if info["isDraft"]:
+            return tag, False
+        existing = {a["name"] for a in info["assets"] if a["name"].endswith(".whl")}
+        if existing == wheel_names:
+            return tag, True
+        print(f"{rel} is published with a different wheel set - trying next post revision")
+        n += 1
 
 
 def check_bundle_uniqueness(assets_dir: Path) -> None:
@@ -192,7 +256,7 @@ def release_transaction(repo: str, rel: str, sha: str, tag: str, title_prefix: s
 
     if dry_run:
         print(f"Dry run verified end-to-end - deleting draft {rel}, nothing published")
-        run_cmd(["gh", "release", "delete", rel, "--repo", repo, "--yes", "--cleanup-tag"], check=False)
+        run_cmd(["gh", "release", "delete", rel, "--repo", repo, "--yes"], check=False)
         return None
 
     run_cmd(["gh", "release", "edit", rel, "--repo", repo, "--draft=false"])
@@ -204,7 +268,8 @@ def release_transaction(repo: str, rel: str, sha: str, tag: str, title_prefix: s
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--repo", required=True)
-    p.add_argument("--tag", required=True, help="Upstream tag, e.g. v2.0.5")
+    p.add_argument("--tag", default=None,
+                    help="Explicit release tag override. Normally omitted: derived from the wheels' version")
     p.add_argument("--sha", required=True, help="Resolved upstream commit")
     p.add_argument("--signer-workflow", required=True)
     p.add_argument("--upstream-predicate",
@@ -219,18 +284,36 @@ def main() -> None:
     run_id = os.environ["GITHUB_RUN_ID"]
     wheel_dir = Path(args.wheel_dir)
     assets_dir = Path(args.assets_dir)
-    rel = f"{args.release_title_prefix}-{args.tag}"
 
     verify_attestations(wheel_dir, assets_dir, args.repo, args.signer_workflow, args.upstream_predicate)
     check_bundle_uniqueness(assets_dir)
-    fetch_build_job_log(args.repo, run_id, args.build_job_name, args.tag, assets_dir)
 
-    url = release_transaction(args.repo, rel, args.sha, args.tag, args.release_title_prefix,
+    tag = args.tag
+    if tag is None:
+        version = derive_version(wheel_dir)
+        wheel_names = {w.name for w in wheel_dir.rglob("*.whl")}
+        tag, already = choose_tag(args.repo, args.release_title_prefix, version, wheel_names)
+        print(f"Wheel version {version} -> release tag {tag}")
+        if already:
+            print(f"{args.release_title_prefix}-{tag} is already published with these exact wheels - nothing to do")
+            write_outputs(tag, None)
+            return
+    rel = f"{args.release_title_prefix}-{tag}"
+
+    fetch_build_job_log(args.repo, run_id, args.build_job_name, tag, assets_dir)
+
+    url = release_transaction(args.repo, rel, args.sha, tag, args.release_title_prefix,
                                 assets_dir, args.signer_workflow, args.dry_run)
+    write_outputs(tag, url)
 
+
+def write_outputs(tag: str, url: str | None) -> None:
     gh_output = os.environ.get("GITHUB_OUTPUT")
-    if gh_output and url:
-        with open(gh_output, "a") as f:
+    if not gh_output:
+        return
+    with open(gh_output, "a") as f:
+        f.write(f"release_tag={tag}\n")
+        if url:
             f.write(f"release_url={url}\n")
 
 
