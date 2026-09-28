@@ -17,6 +17,11 @@ on:
       upstream_sha:
         required: true
         type: string
+      upstream_tag:
+        description: "Upstream git tag that resolved to upstream_sha (e.g. v2.0.5). Only used for release notes; distinct from the release's own tag"
+        required: false
+        default: ""
+        type: string
       wheel_artifact_name:
         required: true
         type: string
@@ -94,6 +99,7 @@ jobs:
           python3 .github/scripts/release_manager.py \
             --repo "${{ github.repository }}" \
             --sha "${{ inputs.upstream_sha }}" \
+            ${{ inputs.upstream_tag && format('--upstream-tag {0}', inputs.upstream_tag) || '' }} \
             --signer-workflow "${{ inputs.signer_workflow }}" \
             --upstream-predicate "${{ inputs.upstream_predicate }}" \
             --release-title-prefix "${{ inputs.release_title_prefix }}" \
