@@ -15,6 +15,10 @@ on:
         description: "Allow network / lockfile updates (first run after a cache reset)"
         required: true
         default: "0"
+      force_new_post:
+        description: "Publish as the next .postN even if a release with these exact wheel names exists (use after hardening attestations)"
+        type: boolean
+        default: false
       dry_run:
         description: "Verify the whole release end-to-end, then delete the draft instead of publishing. Leave OFF to publish for real."
         type: boolean
@@ -238,3 +242,4 @@ jobs:
       source_archive_artifact_name: dbt-source-archive-musllinux-${{ needs.build.outputs.tag }}
       signer_workflow: ${{ github.repository }}/.github/workflows/build-dbt-oss-musllinux.yml
       dry_run: ${{ inputs.dry_run }}
+      force_new_post: ${{ inputs.force_new_post || false }}
