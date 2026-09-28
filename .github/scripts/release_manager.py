@@ -125,7 +125,8 @@ def derive_version(wheel_dir: Path) -> str:
     return versions.pop()
 
 
-def choose_tag(repo: str, prefix: str, version: str, wheel_names: set[str]) -> tuple[str, bool]:
+def choose_tag(repo: str, prefix: str, version: str, wheel_names: set[str],
+               force_new: bool = False) -> tuple[str, bool]:
     """
     First release for an upstream version gets `v<version>`; any later
     release for it gets `.post1`, `.post2`, ... regardless of why (more
@@ -136,6 +137,11 @@ def choose_tag(repo: str, prefix: str, version: str, wheel_names: set[str]) -> t
     appended to it as a plain label. It is never parsed back out of a tag,
     and if the label is already taken by a release with a different wheel
     set, we simply move to the next one.
+
+    force_new: skip the "already released with these exact wheels" no-op
+    and take the next free revision instead. Used when the wheels' names
+    are unchanged but what is attested about them is not (e.g. a newer
+    POLICY_VERSION / attestation schema), which name comparison can't see.
 
     Returns (tag, already_released). already_released means a published
     release under that tag already has exactly these wheels: nothing to do.
@@ -155,7 +161,7 @@ def choose_tag(repo: str, prefix: str, version: str, wheel_names: set[str]) -> t
         if info["isDraft"]:
             return tag, False
         existing = {a["name"] for a in info["assets"] if a["name"].endswith(".whl")}
-        if existing == wheel_names:
+        if existing == wheel_names and not force_new:
             return tag, True
         print(f"{rel} is published with a different wheel set - trying next post revision")
         n += 1
@@ -286,6 +292,8 @@ def main() -> None:
     p.add_argument("--assets-dir", default="release-assets")
     p.add_argument("--build-job-name", default="build")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--force-new-post", action="store_true",
+                    help="Publish under the next free .postN even if a published release already has these exact wheel names")
     args = p.parse_args()
 
     run_id = os.environ["GITHUB_RUN_ID"]
@@ -299,7 +307,8 @@ def main() -> None:
     if tag is None:
         version = derive_version(wheel_dir)
         wheel_names = {w.name for w in wheel_dir.rglob("*.whl")}
-        tag, already = choose_tag(args.repo, args.release_title_prefix, version, wheel_names)
+        tag, already = choose_tag(args.repo, args.release_title_prefix, version, wheel_names,
+                                force_new=args.force_new_post)
         print(f"Wheel version {version} -> release tag {tag}")
         if already:
             print(f"{args.release_title_prefix}-{tag} is already published with these exact wheels - nothing to do")
