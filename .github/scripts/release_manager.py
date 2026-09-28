@@ -197,7 +197,8 @@ def fetch_build_job_log(repo: str, run_id: str, job_name: str, tag: str, assets_
 
 
 def release_transaction(repo: str, rel: str, sha: str, tag: str, title_prefix: str,
-                         assets_dir: Path, signer_workflow: str, dry_run: bool) -> str | None:
+                         assets_dir: Path, signer_workflow: str, dry_run: bool,
+                         upstream_tag: str | None = None) -> str | None:
     """
     Draft -> upload -> verify asset set -> (publish | delete). Same code
     path for real releases and dry runs; they only diverge at the final
@@ -231,8 +232,13 @@ def release_transaction(repo: str, rel: str, sha: str, tag: str, title_prefix: s
         print(f"Resuming incomplete draft release {rel} (not yet public)")
     else:
         title = f"{'DRY RUN - ' if dry_run else ''}{title_prefix} {tag}"
-        notes = (f"Built from commit {sha} (tag {tag}). Verify with: "
-                 f"gh attestation verify <wheel> --repo {repo} --signer-workflow {signer_workflow}")
+        # `tag`/`rel` name this python-wheels distribution release; the upstream
+        # tag + commit are a separate fact and must not be conflated with it.
+        upstream = (f"upstream tag {upstream_tag} (commit {sha})" if upstream_tag
+                    else f"upstream commit {sha}")
+        notes = (f"python-wheels distribution release {rel}, built from {upstream}. "
+                 f"Verify with: gh attestation verify <wheel> --repo {repo} "
+                 f"--signer-workflow {signer_workflow}")
         create_cmd = ["gh", "release", "create", rel, "--repo", repo, "--draft",
                        "--title", title, "--notes", notes]
         if dry_run:
@@ -271,6 +277,7 @@ def main() -> None:
     p.add_argument("--tag", default=None,
                     help="Explicit release tag override. Normally omitted: derived from the wheels' version")
     p.add_argument("--sha", required=True, help="Resolved upstream commit")
+    p.add_argument("--upstream-tag", default=None, help="Upstream git tag that resolved to --sha, e.g. v2.0.5")
     p.add_argument("--signer-workflow", required=True)
     p.add_argument("--upstream-predicate",
                     default="https://patrickryankenneth.github.io/attestations/upstream-source/v1")
@@ -303,7 +310,8 @@ def main() -> None:
     fetch_build_job_log(args.repo, run_id, args.build_job_name, tag, assets_dir)
 
     url = release_transaction(args.repo, rel, args.sha, tag, args.release_title_prefix,
-                                assets_dir, args.signer_workflow, args.dry_run)
+                                assets_dir, args.signer_workflow, args.dry_run,
+                                upstream_tag=args.upstream_tag)
     write_outputs(tag, url)
 
 
