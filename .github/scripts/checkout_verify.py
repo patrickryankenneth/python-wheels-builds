@@ -110,7 +110,23 @@ def normalize_mtimes(clone_dir: Path, sha: str) -> None:
             os.utime(clone_dir / f, (ts, ts), follow_symlinks=False)
         except FileNotFoundError:
             pass
-    print(f"Normalized mtimes of {len(files)} tracked files to {ts}")
+    # Directories too: a build.rs using rerun-if-changed=<dir> makes cargo
+    # compare the directory's own mtime (and its entries') against the
+    # cached build output. git doesn't track dirs, so ls-files never
+    # touches them and they keep the fresh-clone "now" timestamp.
+    dirs = set()
+    for f in files:
+        d = Path(f).parent
+        while str(d) != ".":
+            dirs.add(d)
+            d = d.parent
+    dirs.add(Path("."))
+    for d in dirs:
+        try:
+            os.utime(clone_dir / d, (ts, ts), follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+    print(f"Normalized mtimes of {len(files)} tracked files and {len(dirs)} directories to {ts}")
     if run(["git", "-C", str(clone_dir), "status", "--porcelain"]).stdout.strip():
         print("::error::working tree became dirty after mtime normalization")
         sys.exit(1)
