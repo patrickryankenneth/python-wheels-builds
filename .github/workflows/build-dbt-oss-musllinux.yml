@@ -224,6 +224,7 @@ jobs:
       actions: read
     with:
       upstream_sha: ${{ needs.build.outputs.upstream_sha }}
+      upstream_tag: ${{ needs.build.outputs.tag }}
       wheel_artifact_name: dbt-wheels-musllinux-${{ needs.build.outputs.tag }}
       source_archive_artifact_name: dbt-source-archive-musllinux-${{ needs.build.outputs.tag }}
       signer_workflow: ${{ github.repository }}/.github/workflows/build-dbt-oss-musllinux.yml
