@@ -91,6 +91,31 @@ def ensure_checkout(repo_url: str, sha: str, clone_dir: Path) -> None:
     print(f"Checkout verified: {head}")
 
 
+def normalize_mtimes(clone_dir: Path, sha: str) -> None:
+    """Set every tracked file's mtime to the commit's committer time.
+
+    Cargo decides whether a path dependency is dirty by comparing source
+    mtimes against the mtime of the cached dep-info/fingerprint. A fresh
+    clone stamps every file with "now", so every workspace crate looks
+    modified on every run even when the cache restored fine. Pinning
+    mtimes to the (old, fixed) commit time makes them stable across
+    clones. git status compares content, so the clean-tree check is
+    unaffected."""
+    ts = int(run(["git", "-C", str(clone_dir), "show", "-s", "--format=%ct", sha]).stdout.strip())
+    out = subprocess.run(["git", "-C", str(clone_dir), "ls-files", "-z"],
+                          text=True, capture_output=True, check=True).stdout
+    files = [f for f in out.split("\0") if f]
+    for f in files:
+        try:
+            os.utime(clone_dir / f, (ts, ts), follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+    print(f"Normalized mtimes of {len(files)} tracked files to {ts}")
+    if run(["git", "-C", str(clone_dir), "status", "--porcelain"]).stdout.strip():
+        print("::error::working tree became dirty after mtime normalization")
+        sys.exit(1)
+
+
 def create_archive(clone_dir: Path, archive_dir: Path, sha: str, name_prefix: str) -> tuple[str, str]:
     archive_dir.mkdir(parents=True, exist_ok=True)
     archive_name = f"{name_prefix}-source-{sha}.tar.gz"
@@ -149,6 +174,7 @@ def main() -> None:
 
     sha = resolve_tag(args.repo_url, args.tag)
     ensure_checkout(args.repo_url, sha, args.clone_dir)
+    normalize_mtimes(args.clone_dir, sha)
     archive_name, archive_sha256 = create_archive(args.clone_dir, args.archive_dir, sha, prefix)
     write_predicate(args.predicate_path, args.repo_url, args.tag, sha,
                      args.policy_version, archive_name, archive_sha256)
