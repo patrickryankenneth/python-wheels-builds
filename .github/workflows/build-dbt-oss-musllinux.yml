@@ -23,12 +23,6 @@ on:
         description: "Verify the whole release end-to-end, then delete the draft instead of publishing. Leave OFF to publish for real."
         type: boolean
         default: false
-  push:
-    paths:
-      - "environments/alpine-3.20-musl/Containerfile"
-      - "recipes/dbt-oss/build.sh"
-      - ".github/scripts/checkout_verify.py"
-      - ".github/workflows/build-dbt-oss-musllinux.yml"
 
 # packages: read is belt-and-suspenders: the image is public so pulling
 # doesn't strictly require it, but a newly-published package on GHCR
