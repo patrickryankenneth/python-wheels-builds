@@ -204,7 +204,7 @@ def fetch_build_job_log(repo: str, run_id: str, job_name: str, tag: str, assets_
 
 def release_transaction(repo: str, rel: str, sha: str, tag: str, title_prefix: str,
                          assets_dir: Path, signer_workflow: str, dry_run: bool,
-                         upstream_tag: str | None = None) -> str | None:
+                         build_sha: str, upstream_tag: str | None = None) -> str | None:
     """
     Draft -> upload -> verify asset set -> (publish | delete). Same code
     path for real releases and dry runs; they only diverge at the final
@@ -215,6 +215,13 @@ def release_transaction(repo: str, rel: str, sha: str, tag: str, title_prefix: s
     exact asset set is a no-op; a different asset set is refused rather
     than silently overwriting something someone may have already verified
     and pinned. An incomplete draft (died mid-upload) is safely resumed.
+
+    The release tag is pinned to `build_sha`, the commit this run (and so
+    the wheel's provenance) was built from. Without an explicit target,
+    GitHub creates the tag at the tip of the default branch at publish
+    time, which may be a later commit than the one that built the wheel.
+    Releases are immutable once published, so the target is set and
+    asserted while it is still a draft, in dry runs too.
 
     Returns the published release URL, or None if nothing was published
     (dry run, or an already-published release with matching assets).
@@ -246,7 +253,8 @@ def release_transaction(repo: str, rel: str, sha: str, tag: str, title_prefix: s
                  f"Verify with: gh attestation verify <wheel> --repo {repo} "
                  f"--signer-workflow {signer_workflow}")
         create_cmd = ["gh", "release", "create", rel, "--repo", repo, "--draft",
-                       "--title", title, "--notes", notes]
+                       "--title", title, "--notes", notes,
+                       "--target", build_sha]
         if dry_run:
             create_cmd.insert(create_cmd.index("--draft") + 1, "--prerelease")
         run_cmd(create_cmd)
@@ -266,6 +274,16 @@ def release_transaction(repo: str, rel: str, sha: str, tag: str, title_prefix: s
         print(f"expected: {expected}")
         sys.exit(1)
 
+    # Also covers a resumed draft, which may have been created earlier
+    # without a target (or against a branch name). Runs before the
+    # dry-run branch so dry runs exercise it.
+    run_cmd(["gh", "release", "edit", rel, "--repo", repo, "--target", build_sha])
+    target = run_cmd_json(["gh", "release", "view", rel, "--repo", repo,
+                            "--json", "targetCommitish"])["targetCommitish"]
+    if target != build_sha:
+        print(f"::error::release target {target} != build commit {build_sha} - not publishing")
+        sys.exit(1)
+
     if dry_run:
         print(f"Dry run verified end-to-end - deleting draft {rel}, nothing published")
         run_cmd(["gh", "release", "delete", rel, "--repo", repo, "--yes"], check=False)
@@ -274,6 +292,13 @@ def release_transaction(repo: str, rel: str, sha: str, tag: str, title_prefix: s
     run_cmd(["gh", "release", "edit", rel, "--repo", repo, "--draft=false"])
     url = json.loads(run_cmd(["gh", "release", "view", rel, "--repo", repo, "--json", "url"]).stdout)["url"]
     print(f"Published {rel} -> {url}")
+
+    # Alarm only: the release is immutable now, so a mismatch can't be
+    # fixed, but it must not pass silently.
+    ref = run_cmd_json(["gh", "api", f"repos/{repo}/git/ref/tags/{rel}"])
+    if ref["object"]["type"] == "commit" and ref["object"]["sha"] != build_sha:
+        print(f"::error::published tag {rel} points at {ref['object']['sha']}, not build commit {build_sha}")
+        sys.exit(1)
     return url
 
 
@@ -291,12 +316,19 @@ def main() -> None:
     p.add_argument("--wheel-dir", default="dist")
     p.add_argument("--assets-dir", default="release-assets")
     p.add_argument("--build-job-name", default="build")
+    p.add_argument("--build-sha", default=None,
+                    help="Commit the release tag must point at (the commit the wheels were built from). "
+                         "Default: $GITHUB_SHA")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--force-new-post", action="store_true",
                     help="Publish under the next free .postN even if a published release already has these exact wheel names")
     args = p.parse_args()
 
     run_id = os.environ["GITHUB_RUN_ID"]
+    build_sha = args.build_sha or os.environ.get("GITHUB_SHA", "")
+    if len(build_sha) != 40 or any(c not in "0123456789abcdef" for c in build_sha):
+        print(f"::error::build commit must be a full 40-char SHA, got {build_sha!r}")
+        sys.exit(1)
     wheel_dir = Path(args.wheel_dir)
     assets_dir = Path(args.assets_dir)
 
@@ -320,7 +352,7 @@ def main() -> None:
 
     url = release_transaction(args.repo, rel, args.sha, tag, args.release_title_prefix,
                                 assets_dir, args.signer_workflow, args.dry_run,
-                                upstream_tag=args.upstream_tag)
+                                build_sha=build_sha, upstream_tag=args.upstream_tag)
     write_outputs(tag, url)
 
 
