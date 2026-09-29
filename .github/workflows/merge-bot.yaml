@@ -1,0 +1,110 @@
+name: Auto Fast-Forward on PR
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+# One run per PR; a new push cancels the older run (and its pending approval).
+concurrency:
+  group: ff-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  # ===============================================================
+  # JOB 1: Tests, scans, linters
+  # Add "Run Tests & Security Scans" as a required check in the ruleset.
+  # ===============================================================
+  ci-and-security:
+    name: Run Tests & Security Scans
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Run Test Suite
+        run: |
+          echo "TODO: replace with real build/test/scan commands"
+          # pytest
+          # cargo test
+          # If this stays a bare echo, the check always passes and proves nothing.
+
+  # ===============================================================
+  # JOB 2: PR must be linear and fast-forwardable onto main
+  # Add "Verify Fast-Forward Compatibility" as a required check too.
+  # ===============================================================
+  verify-fast-forward:
+    name: Verify Fast-Forward Compatibility
+    runs-on: ubuntu-latest
+    env:
+      BASE_REF: ${{ github.base_ref }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Checkout full history at PR head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Validate linear history and ancestry
+        run: |
+          set -euo pipefail
+          git fetch origin "$BASE_REF"
+
+          # 1. No merge commits between main and the PR head
+          MERGES=$(git rev-list --merges "origin/$BASE_REF..$HEAD_SHA")
+          if [ -n "$MERGES" ]; then
+            echo "::error::PR contains merge commits. History must be strictly linear."
+            exit 1
+          fi
+
+          # 2. main must be an ancestor of the PR head (pure fast-forward)
+          if ! git merge-base --is-ancestor "origin/$BASE_REF" "$HEAD_SHA"; then
+            echo "::error::PR is behind '$BASE_REF'. Rebase locally so it can fast-forward."
+            exit 1
+          fi
+
+          echo "PR head $HEAD_SHA is linear and fast-forwardable onto $BASE_REF."
+
+  # ===============================================================
+  # JOB 3: Human approval gate, then fast-forward push via deploy key
+  # The environment pauses here until you approve. DEPLOY_KEY is an
+  # ENVIRONMENT secret on promote-to-main, so it is only released after
+  # approval. The deploy key is the bypass actor in the main ruleset.
+  # ===============================================================
+  fast-forward-merge:
+    name: Fast-Forward to Main
+    needs: [ci-and-security, verify-fast-forward]
+    # Same-repo branches only (fork heads can't be fetched from origin)
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    environment: promote-to-main
+    env:
+      BASE_REF: ${{ github.base_ref }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Checkout with deploy key
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+
+      - name: Fast-forward push (no new commits, signatures preserved)
+        run: |
+          set -euo pipefail
+          git fetch origin "$BASE_REF"
+
+          # Re-check right before pushing in case main moved during approval
+          git merge-base --is-ancestor "origin/$BASE_REF" "$HEAD_SHA" \
+            || { echo "::error::main moved; PR is no longer fast-forwardable. Rebase and re-run."; exit 1; }
+
+          # Push the exact tested SHA. No --force: a non-fast-forward is rejected.
+          git push origin "$HEAD_SHA:refs/heads/$BASE_REF"
+
+          echo "Fast-forwarded $BASE_REF to $HEAD_SHA."
