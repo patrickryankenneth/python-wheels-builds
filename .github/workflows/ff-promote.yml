@@ -1,0 +1,183 @@
+name: Promote to main (fast-forward)
+
+# pull_request_target: GitHub runs THIS file as it exists on main, so a PR
+# cannot rewrite the promote logic that holds the app key. Nothing from the PR
+# is ever checked out or executed here; the jobs only run git and gh commands
+# against the PR's commit objects.
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions: {}
+
+# A new push cancels the older run and its pending approval.
+concurrency:
+  group: promote-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  # Checks that must be `success` on the PR head BEFORE an approval is even
+  # requested. Names must match exactly:
+  #   gh api repos/OWNER/REPO/commits/<sha>/check-runs --jq '.check_runs[].name'
+  # A REPLACE-* entry fails the run immediately (fail closed).
+  REQUIRED_CHECKS: |
+    Run Tests & Security Scans
+    REPLACE-WITH-CODEQL-CHECK-NAME
+  # Space-separated GitHub logins whose commits may be promoted.
+  ALLOWED_AUTHORS: patrickryankenneth
+
+jobs:
+  gates:
+    name: Gates (checks, signatures, ancestry)
+    # Same-repo branches only; fork heads are never promoted.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      checks: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR: ${{ github.event.pull_request.number }}
+      BASE_REF: ${{ github.base_ref }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Checkout base branch (full history, PR code is NOT checked out)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Refuse placeholder check names
+        run: |
+          if grep -q '^REPLACE-' <<<"$REQUIRED_CHECKS"; then
+            echo "::error::REQUIRED_CHECKS still has a REPLACE-* placeholder"
+            exit 1
+          fi
+
+      - name: Fetch PR head objects and confirm the SHA
+        run: |
+          set -euo pipefail
+          git fetch origin "refs/pull/$PR/head"
+          [ "$(git rev-parse FETCH_HEAD)" = "$HEAD_SHA" ] \
+            || { echo "::error::PR head moved since this run started"; exit 1; }
+
+      - name: Linear history and fast-forwardable
+        run: |
+          set -euo pipefail
+          git fetch origin "$BASE_REF"
+          if [ -n "$(git rev-list --merges "origin/$BASE_REF..$HEAD_SHA")" ]; then
+            echo "::error::PR contains merge commits"; exit 1
+          fi
+          git merge-base --is-ancestor "origin/$BASE_REF" "$HEAD_SHA" \
+            || { echo "::error::PR is behind $BASE_REF; rebase locally"; exit 1; }
+
+      - name: Every commit is signature-verified and by an allowed author
+        run: |
+          set -euo pipefail
+          bad=0
+          for sha in $(git rev-list --reverse "origin/$BASE_REF..$HEAD_SHA"); do
+            IFS=$'\t' read -r verified reason login < <(
+              gh api "repos/$REPO/commits/$sha" \
+                --jq '[.commit.verification.verified, .commit.verification.reason, (.author.login // "none")] | @tsv')
+            echo "$sha verified=$verified reason=$reason author=$login"
+            if [ "$verified" != true ] || [ "$reason" != valid ]; then
+              echo "::error::$sha has no valid verified signature"; bad=1
+            fi
+            case " $ALLOWED_AUTHORS " in
+              *" $login "*) ;;
+              *) echo "::error::$sha author '$login' is not allowed"; bad=1 ;;
+            esac
+          done
+          [ "$bad" = 0 ]
+
+      - name: Wait for required checks, require success
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 1500))
+          fetch() {
+            gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" \
+              --jq '.check_runs[] | [.name, .status, (.conclusion // ""), .started_at] | @tsv'
+          }
+          while :; do
+            rows=$(fetch)
+            pending=0; failed=0
+            while IFS= read -r name; do
+              [ -n "$name" ] || continue
+              row=$(awk -F'\t' -v n="$name" '$1==n' <<<"$rows" | sort -t$'\t' -k4 | tail -n1)
+              if [ -z "$row" ]; then
+                state=missing; pending=1
+              else
+                status=$(cut -f2 <<<"$row"); concl=$(cut -f3 <<<"$row")
+                if [ "$status" != completed ]; then
+                  state=$status; pending=1
+                elif [ "$concl" = success ]; then
+                  state=success
+                else
+                  state="failed:$concl"; failed=1
+                fi
+              fi
+              echo "$name -> $state"
+            done <<<"$REQUIRED_CHECKS"
+            [ "$failed" = 0 ] || { echo "::error::a required check failed"; exit 1; }
+            [ "$pending" = 1 ] || break
+            [ "$SECONDS" -lt "$deadline" ] || { echo "::error::timed out waiting for checks"; exit 1; }
+            sleep 20
+          done
+
+  promote:
+    name: Fast-Forward to Main
+    needs: gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Pauses for your approval. Deployment branches for this environment
+    # should be limited to `main`, and "Prevent self-review" must stay OFF
+    # (you are the trigger and the only approver).
+    environment: promote-to-main
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      REPO: ${{ github.repository }}
+      PR: ${{ github.event.pull_request.number }}
+      BASE_REF: ${{ github.base_ref }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Mint short-lived app token (contents write, this repo only)
+        id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
+      - name: Checkout base branch with app token (PR code is NOT checked out)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Re-check after approval, then fast-forward push
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          git fetch origin "refs/pull/$PR/head"
+          [ "$(git rev-parse FETCH_HEAD)" = "$HEAD_SHA" ] \
+            || { echo "::error::PR head moved during approval"; exit 1; }
+
+          [ "$(gh api "repos/$REPO/pulls/$PR" --jq '.state + " " + .head.sha')" = "open $HEAD_SHA" ] \
+            || { echo "::error::PR is no longer open at $HEAD_SHA"; exit 1; }
+
+          git fetch origin "$BASE_REF"
+          git merge-base --is-ancestor "origin/$BASE_REF" "$HEAD_SHA" \
+            || { echo "::error::$BASE_REF moved; rebase and re-run"; exit 1; }
+
+          # Exact tested SHA, no --force: anything non-fast-forward is rejected.
+          git push origin "$HEAD_SHA:refs/heads/$BASE_REF"
+
+          echo "Fast-forwarded $BASE_REF to $HEAD_SHA (PR #$PR)." >> "$GITHUB_STEP_SUMMARY"
