@@ -109,6 +109,26 @@ jobs:
             || { echo "::error::author/committer name or email mismatch"; exit 1; }
           echo "Signatures, author, fast-forward OK."
 
+      - name: Signing key fingerprint allowlist
+        env:
+          ALLOWED_FPRS: ${{ vars.ALLOWED_SIGNING_FPRS }}
+        run: |
+          set -euo pipefail
+          [ -n "${ALLOWED_FPRS// /}" ] || { echo "::error::repo variable ALLOWED_SIGNING_FPRS is empty"; exit 1; }
+          ALLOWED=$(tr ' ,' '\n\n' <<<"$ALLOWED_FPRS" | tr a-f A-F | sed '/^$/d')
+          CMP=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BASE_REF...$HEAD_SHA")
+          N=$(jq '.commits | length' <<<"$CMP")
+          for i in $(seq 0 $((N - 1))); do
+            SHA=$(jq -r ".commits[$i].sha" <<<"$CMP")
+            FPR=$(jq -r ".commits[$i].commit.verification.signature" <<<"$CMP" \
+              | gpg --batch --list-packets 2>&1 \
+              | sed -n 's/.*issuer fpr v4 \([0-9A-Fa-f]\{40\}\).*/\1/p' | head -1 | tr a-f A-F)
+            [ -n "$FPR" ] || { echo "::error::no signing fingerprint found for $SHA"; exit 1; }
+            grep -qxF "$FPR" <<<"$ALLOWED" \
+              || { echo "::error::$SHA signed by unlisted key $FPR"; exit 1; }
+            echo "$SHA signed by allowed key $FPR"
+          done
+
       - name: Wait for CodeQL checks
         run: |
           set -euo pipefail
