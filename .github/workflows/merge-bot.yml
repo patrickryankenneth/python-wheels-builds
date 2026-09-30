@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  checks: read
 
 # One run per PR; a new push cancels the older run (and its pending approval).
 concurrency:
@@ -72,6 +73,52 @@ jobs:
           echo "PR head $HEAD_SHA is linear and fast-forwardable onto $BASE_REF."
 
   # ===============================================================
+  # JOB 2b: Gates the bot enforces before it may push
+  # Signed commits, author is the owner, CodeQL green. Runs no PR code.
+  # ===============================================================
+  gates:
+    name: Gates (signatures, author, CodeQL)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BASE_REF: ${{ github.base_ref }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      ALLOWED_AUTHOR: patrickryankenneth
+    steps:
+      - name: Signatures, author, fast-forward
+        run: |
+          set -euo pipefail
+          CMP=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BASE_REF...$HEAD_SHA")
+          jq -e '.status == "ahead" or .status == "identical"' <<<"$CMP" >/dev/null \
+            || { echo "::error::PR is not a fast-forward of $BASE_REF"; exit 1; }
+          jq -e '[.commits[] | select(.commit.verification.verified != true)] | length == 0' <<<"$CMP" >/dev/null \
+            || { echo "::error::unsigned or unverified commit in PR"; exit 1; }
+          jq -e --arg a "$ALLOWED_AUTHOR" '[.commits[] | select(.author.login != $a)] | length == 0' <<<"$CMP" >/dev/null \
+            || { echo "::error::commit not authored by $ALLOWED_AUTHOR"; exit 1; }
+          echo "Signatures, author, fast-forward OK."
+
+      - name: Wait for CodeQL checks
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 50); do
+            ok=1
+            for name in "CodeQL" "Analyze (actions)"; do
+              c=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs?per_page=100" \
+                --jq "[.check_runs[] | select(.name == \"$name\")] | sort_by(.started_at) | last | .conclusion // \"none\"")
+              echo "$name: $c"
+              if [ "$c" = "none" ] || [ "$c" = "null" ]; then ok=0
+              elif [ "$c" != "success" ]; then echo "::error::$name concluded $c"; exit 1
+              fi
+            done
+            [ "$ok" = 1 ] && { echo "CodeQL checks green."; exit 0; }
+            sleep 30
+          done
+          echo "::error::timed out waiting for CodeQL"; exit 1
+
+  # ===============================================================
   # JOB 3: Human approval gate, then fast-forward push via GitHub App
   # The environment pauses here until you approve. BOT_APP_ID and
   # BOT_PRIVATE_KEY are ENVIRONMENT secrets on promote-to-main, so they
@@ -80,7 +127,7 @@ jobs:
   # ===============================================================
   fast-forward-merge:
     name: Fast-Forward to Main
-    needs: [ci-and-security, verify-fast-forward]
+    needs: [ci-and-security, verify-fast-forward, gates]
     # Same-repo branches only (fork heads can't be fetched from origin)
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
