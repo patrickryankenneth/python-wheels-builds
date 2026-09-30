@@ -72,10 +72,11 @@ jobs:
           echo "PR head $HEAD_SHA is linear and fast-forwardable onto $BASE_REF."
 
   # ===============================================================
-  # JOB 3: Human approval gate, then fast-forward push via deploy key
-  # The environment pauses here until you approve. DEPLOY_KEY is an
-  # ENVIRONMENT secret on promote-to-main, so it is only released after
-  # approval. The deploy key is the bypass actor in the main ruleset.
+  # JOB 3: Human approval gate, then fast-forward push via GitHub App
+  # The environment pauses here until you approve. BOT_APP_ID and
+  # BOT_PRIVATE_KEY are ENVIRONMENT secrets on promote-to-main, so they
+  # are only released after approval. The app is the bypass actor in the
+  # main ruleset.
   # ===============================================================
   fast-forward-merge:
     name: Fast-Forward to Main
@@ -88,12 +89,21 @@ jobs:
       BASE_REF: ${{ github.base_ref }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
-      - name: Checkout with deploy key
+      - name: Mint short-lived app token (contents: write, this repo only)
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
+      - name: Checkout with app token
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
-          ssh-key: ${{ secrets.DEPLOY_KEY }}
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Fast-forward push (no new commits, signatures preserved)
         run: |
