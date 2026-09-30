@@ -87,6 +87,8 @@ jobs:
       BASE_REF: ${{ github.base_ref }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       ALLOWED_AUTHOR: patrickryankenneth
+      ALLOWED_NAME: Patrick Ryan
+      ALLOWED_EMAIL: patrickryankenneth@gmail.com
     steps:
       - name: Signatures, author, fast-forward
         run: |
@@ -96,8 +98,14 @@ jobs:
             || { echo "::error::PR is not a fast-forward of $BASE_REF"; exit 1; }
           jq -e '[.commits[] | select(.commit.verification.verified != true)] | length == 0' <<<"$CMP" >/dev/null \
             || { echo "::error::unsigned or unverified commit in PR"; exit 1; }
+          jq -e '[.commits[] | select(.commit.verification.reason != "valid")] | length == 0' <<<"$CMP" >/dev/null \
+            || { echo "::error::commit signature reason is not 'valid'"; exit 1; }
           jq -e --arg a "$ALLOWED_AUTHOR" '[.commits[] | select(.author.login != $a)] | length == 0' <<<"$CMP" >/dev/null \
             || { echo "::error::commit not authored by $ALLOWED_AUTHOR"; exit 1; }
+          jq -e --arg a "$ALLOWED_AUTHOR" '[.commits[] | select(.committer.login != $a)] | length == 0' <<<"$CMP" >/dev/null \
+            || { echo "::error::commit not committed by $ALLOWED_AUTHOR (web-flow / web UI commit?)"; exit 1; }
+          jq -e --arg n "$ALLOWED_NAME" --arg e "$ALLOWED_EMAIL" '[.commits[] | select(.commit.author.name != $n or .commit.author.email != $e or .commit.committer.name != $n or .commit.committer.email != $e)] | length == 0' <<<"$CMP" >/dev/null \
+            || { echo "::error::author/committer name or email mismatch"; exit 1; }
           echo "Signatures, author, fast-forward OK."
 
       - name: Wait for CodeQL checks
