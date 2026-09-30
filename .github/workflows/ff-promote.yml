@@ -24,7 +24,8 @@ env:
   # A REPLACE-* entry fails the run immediately (fail closed).
   REQUIRED_CHECKS: |
     Run Tests & Security Scans
-    REPLACE-WITH-CODEQL-CHECK-NAME
+    Analyze (actions)
+    CodeQL
   # Space-separated GitHub logins whose commits may be promoted.
   ALLOWED_AUTHORS: patrickryankenneth
 
