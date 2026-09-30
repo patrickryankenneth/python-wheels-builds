@@ -30,10 +30,11 @@ jobs:
 
       - name: Run Test Suite
         run: |
-          echo "TODO: replace with real build/test/scan commands"
-          # pytest
-          # cargo test
-          # If this stays a bare echo, the check always passes and proves nothing.
+          set -euo pipefail
+          bad=$(grep -rnE '^\s*(-\s*)?uses:\s+[^./]' .github/workflows | grep -vE '@[0-9a-f]{40}' || true)
+          [ -z "$bad" ] || { echo "::error::unpinned actions:"; echo "$bad"; exit 1; }
+          if ls .github/scripts/*.py >/dev/null 2>&1; then python3 -m py_compile .github/scripts/*.py; fi
+          echo "Actions pinned, scripts compile."
 
   # ===============================================================
   # JOB 2: PR must be linear and fast-forwardable onto main
@@ -111,7 +112,7 @@ jobs:
       - name: Wait for CodeQL checks
         run: |
           set -euo pipefail
-          for i in $(seq 1 50); do
+          for i in $(seq 1 20); do
             ok=1
             for name in "CodeQL" "Analyze (actions)"; do
               c=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs?per_page=100" \
@@ -124,7 +125,7 @@ jobs:
             [ "$ok" = 1 ] && { echo "CodeQL checks green."; exit 0; }
             sleep 30
           done
-          echo "::error::timed out waiting for CodeQL"; exit 1
+          echo "::error::CodeQL produced no result in 10 min. Check that the CodeQL workflow is enabled."; exit 1
 
   # ===============================================================
   # JOB 3: Human approval gate, then fast-forward push via GitHub App
