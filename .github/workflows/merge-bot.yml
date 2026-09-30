@@ -145,23 +145,17 @@ jobs:
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
 
-      - name: Checkout with app token
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha }}
-          token: ${{ steps.app-token.outputs.token }}
-
-      - name: Fast-forward push (no new commits, signatures preserved)
+      - name: Fast-forward main via API (no checkout, no PR code)
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
-          git fetch origin "$BASE_REF"
-
-          # Re-check right before pushing in case main moved during approval
-          git merge-base --is-ancestor "origin/$BASE_REF" "$HEAD_SHA" \
-            || { echo "::error::main moved; PR is no longer fast-forwardable. Rebase and re-run."; exit 1; }
-
-          # Push the exact tested SHA. No --force: a non-fast-forward is rejected.
-          git push origin "$HEAD_SHA:refs/heads/$BASE_REF"
-
+          STATUS=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BASE_REF...$HEAD_SHA" --jq .status)
+          case "$STATUS" in
+            ahead|identical) ;;
+            *) echo "::error::main moved (compare status: $STATUS). Rebase and re-run."; exit 1 ;;
+          esac
+          # Non-force ref update: rejected unless it is a pure fast-forward. Same SHA, signatures kept.
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/$BASE_REF" \
+            -f sha="$HEAD_SHA" -F force=false --jq '.object.sha'
           echo "Fast-forwarded $BASE_REF to $HEAD_SHA."
