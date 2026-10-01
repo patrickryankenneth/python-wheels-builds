@@ -5,39 +5,116 @@ on:
     branches: [main]
     paths:
       - "environments/alpine-3.20-musl/Containerfile"
+      - "environments/alpine-3.20-musl/requirements-builder.txt"
+      - "environments/alpine-3.20-musl/apk.lock.*"
       - ".github/workflows/build-environment-image.yml"
   workflow_dispatch: {}
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/pywheels-alpine-builder
+  CONTEXT: environments/alpine-3.20-musl
 
-permissions:
-  contents: read
-  packages: write
+# No default permissions; each job asks for exactly what it needs.
+permissions: {}
 
 jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
+  build-attest:
+    name: build (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Compute content-addressed tag
+      - name: Compute recipe tag
         id: tag
-        run: echo "hash=${{ hashFiles('environments/alpine-3.20-musl/Containerfile') }}" >> "$GITHUB_OUTPUT"
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: echo "tag=${{ hashFiles('environments/alpine-3.20-musl/Containerfile', 'environments/alpine-3.20-musl/requirements-builder.txt') }}-${ARCH}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
 
-      - name: Build
+      # Build locally first so a bad apk lock fails BEFORE anything is pushed.
+      - name: Build (local, not pushed yet)
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          docker build \
-            -f environments/alpine-3.20-musl/Containerfile \
-            -t "${IMAGE}:${{ steps.tag.outputs.hash }}" \
-            -t "${IMAGE}:latest" \
-            environments/alpine-3.20-musl/
+          docker buildx build --load \
+            -f "$CONTEXT/Containerfile" \
+            -t "$IMAGE:$TAG" \
+            "$CONTEXT"
 
-      - name: Push
+      - name: Check apk package list against committed lock
+        env:
+          TAG: ${{ matrix.arch }}
+          REF: ${{ steps.tag.outputs.tag }}
         run: |
-          docker push "${IMAGE}:${{ steps.tag.outputs.hash }}"
-          docker push "${IMAGE}:latest"
+          docker run --rm --entrypoint sh "$IMAGE:$REF" -c 'apk info -v | sort' > apk.actual
+          LOCK="$CONTEXT/apk.lock.$TAG"
+          if [ ! -f "$LOCK" ]; then
+            echo "::error::$LOCK is missing. Download the apk-lock-$TAG artifact, review it, commit it as $LOCK."
+            exit 1
+          fi
+          if ! diff -u "$LOCK" apk.actual; then
+            echo "::error::Installed apk packages differ from $LOCK. If the change is intended, commit the new list."
+            exit 1
+          fi
+
+      - name: Upload apk list (for first-time lock or review)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: apk-lock-${{ matrix.arch }}
+          path: apk.actual
+          if-no-files-found: ignore
+
+      - name: Push and capture digest
+        id: push
+        env:
+          REF: ${{ steps.tag.outputs.tag }}
+        run: |
+          docker push "$IMAGE:$REF"
+          DIGEST="$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:$REF" | cut -d@ -f2)"
+          case "$DIGEST" in sha256:????????????????????????????????????????????????????????????????) ;; *) echo "::error::bad digest: $DIGEST"; exit 1;; esac
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "$DIGEST" > "image.digest.${{ matrix.arch }}"
+          echo "### ${{ matrix.arch }} builder digest" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$IMAGE@$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/pywheels-alpine-builder
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Verify the attestation we just made
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          gh attestation verify "oci://$IMAGE@$DIGEST" \
+            --repo "${{ github.repository }}" \
+            --signer-workflow "${{ github.repository }}/.github/workflows/build-environment-image.yml"
+
+      - name: Upload digest file
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: image-digest-${{ matrix.arch }}
+          path: image.digest.${{ matrix.arch }}

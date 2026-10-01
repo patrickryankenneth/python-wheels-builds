@@ -5,21 +5,26 @@
 #
 # This image is the reusable *environment*, not a specific build. The
 # actual clone-at-pinned-ref + maturin build step is deliberately NOT
-# baked in here - see build.sh (TODO, blocked on knowing the exact repo/
-# ref/flags build-dbt-oss-win-arm64.yml already uses) - so this image can
-# be rebuilt independently of that and reused across iterations.
+# baked in here, so this image can be rebuilt independently.
+#
+# Pinning policy (every REPLACE_ME below fails the build loudly until filled):
+#   - base image: by multi-arch index digest
+#   - rustup-init: exact version, sha256 checked per architecture
+#   - rustc: exact version
+#   - sccache: exact version, --locked
+#   - maturin: exact version, --require-hashes from requirements-builder.txt
+#   - apk packages: NOT hash-pinnable; the CI workflow diffs the installed
+#     list against the committed apk.lock.<arch> and fails on any change.
 
-FROM docker.io/library/alpine:3.20
+# Get the digest with:  skopeo inspect --format '{{.Digest}}' docker://docker.io/library/alpine:3.20
+FROM docker.io/library/alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 
 # build-base: gcc/make/etc - the C toolchain Rust's linker needs.
 # python3-dev: maturin's build backend links against libpython.
 # openssl-dev/libffi-dev: common transitive needs for Rust crates with
-# native deps; harmless to include even if dbt-oss's Rust side doesn't
-# need them - cheap compared to a rebuild if it turns out one is missing.
+# native deps.
 # NOTE: Alpine has no package literally named "protoc" - the binary ships
-# in "protobuf" (protobuf-dev is headers/well-known-types only, no binary
-# by itself). An earlier version of this file listed "protoc" here, which
-# is not a real apk package name - do not reintroduce it.
+# in "protobuf". Do not reintroduce "protoc" here.
 RUN apk add --no-cache \
         build-base \
         curl \
@@ -37,44 +42,52 @@ RUN apk add --no-cache \
         protobuf \
         protobuf-dev
 
-# maturin's wheel-repair step (bundling libgcc_s.so.1 etc. into the wheel)
-# shells out to patchelf - verify it's actually present now, not after
-# another full compile.
-RUN patchelf --version
+# Fail the image build in seconds if these didn't land.
+RUN patchelf --version && protoc --version
 
-# Fail the image build in seconds if protoc didn't actually land, instead
-# of discovering it minutes into a cargo build later (what just happened).
-RUN protoc --version
-
-# prost-build (dbt-state's build.rs dep) reads these two vars directly if
-# set - this is prost-build's own documented "typical Linux install" config,
-# not Alpine-specific. Without PROTOC_INCLUDE it falls back to its own
-# bundled well-known-types rather than failing, so this is a belt-and-
-# suspenders match to upstream docs, not a confirmed bug workaround.
 ENV PROTOC=/usr/bin/protoc \
     PROTOC_INCLUDE=/usr/include
 
-# rustup rather than apk's rust package: apk's rust floats to whatever
-# Alpine 3.20 currently ships, which can lag; rustup lets us pin an exact
-# toolchain version deliberately - the same reasoning pyproject.toml
-# already applies to pinning sigstore's version range (a build/security
-# -relevant toolchain shouldn't silently float).
+# rustup-init: pinned version, sha256 checked against a value committed here.
+# Copy each hash from https://static.rust-lang.org/rustup/archive/<version>/<triple>/rustup-init.sha256
+# (triples: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl).
+ARG RUSTUP_VERSION=1.29.1
+ARG RUSTUP_SHA256_X86_64=331228566cc931f32cd684f9bebc5956a5e5d7394c8d5de595f196a658ab98e6
+ARG RUSTUP_SHA256_AARCH64=1ddf36182ac5d1782dbeefcb9bea7f5f9412d88f4a0d5047b1564a223624e8c6
+ARG RUST_VERSION=1.98.1
+
 ENV RUSTUP_HOME=/opt/rustup \
     CARGO_HOME=/opt/cargo \
     PATH=/opt/cargo/bin:$PATH
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --default-toolchain stable --profile minimal
 
-# sccache: compilation is the expensive part of iterating on this build.
-# Cache lives on a bind-mounted host dir at run time (SCCACHE_DIR below),
-# not baked into the image - the image is a reusable environment, not a
-# snapshot of one build's cache state.
-RUN cargo install sccache --locked
+RUN set -eu; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+        x86_64)  sha="$RUSTUP_SHA256_X86_64" ;; \
+        aarch64) sha="$RUSTUP_SHA256_AARCH64" ;; \
+        *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/rustup-init \
+        "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${arch}-unknown-linux-musl/rustup-init"; \
+    echo "${sha}  /tmp/rustup-init" | sha256sum -c -; \
+    chmod +x /tmp/rustup-init; \
+    /tmp/rustup-init -y --default-toolchain "${RUST_VERSION}" --profile minimal --no-modify-path; \
+    rm /tmp/rustup-init; \
+    rustc --version | grep -F "${RUST_VERSION}"
+
+# sccache: exact version. Cache lives on a bind-mounted host dir at run time.
+ARG SCCACHE_VERSION=0.18.0
+RUN cargo install sccache --version "${SCCACHE_VERSION}" --locked
 ENV RUSTC_WRAPPER=/opt/cargo/bin/sccache \
     SCCACHE_DIR=/sccache \
     CARGO_TARGET_DIR=/cargo-target
 
-RUN pip install --break-system-packages --no-cache-dir maturin
+# maturin: exact version with hashes for both architectures.
+COPY requirements-builder.txt /tmp/requirements-builder.txt
+RUN pip install --break-system-packages --no-cache-dir --require-hashes \
+        -r /tmp/requirements-builder.txt \
+    && rm /tmp/requirements-builder.txt \
+    && maturin --version
 
 WORKDIR /build
 CMD ["/bin/sh"]
