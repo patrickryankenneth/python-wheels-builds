@@ -60,12 +60,19 @@ jobs:
             -t "$IMAGE:$TAG" \
             "$CONTEXT"
 
-      - name: Check apk package list against committed lock
+      - name: Check apk package list against committed lock (exact match)
         env:
           TAG: ${{ matrix.arch }}
           REF: ${{ steps.tag.outputs.tag }}
         run: |
-          docker run --rm --entrypoint sh "$IMAGE:$REF" -c 'apk info -v | sort' > apk.actual
+          set -eu
+          actual_arch="$(docker run --rm --entrypoint apk "$IMAGE:$REF" --print-arch)"
+          if [ "$actual_arch" != "$TAG" ]; then
+            echo "::error::image architecture is $actual_arch, expected $TAG"
+            exit 1
+          fi
+          docker run --rm --entrypoint sh "$IMAGE:$REF" -c 'apk info -v | LC_ALL=C sort' > apk.actual
+          [ -s apk.actual ] || { echo "::error::apk list is empty"; exit 1; }
           LOCK="$CONTEXT/apk.lock.$TAG"
           if [ ! -f "$LOCK" ]; then
             echo "::error::$LOCK is missing. Download the apk-lock-$TAG artifact, review it, commit it as $LOCK."
@@ -113,8 +120,49 @@ jobs:
             --repo "${{ github.repository }}" \
             --signer-workflow "${{ github.repository }}/.github/workflows/build-environment-image.yml"
 
-      - name: Upload digest file
+      - name: Record builder inputs
+        env:
+          ARCH: ${{ matrix.arch }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -eu
+          case "$ARCH" in
+            x86_64)  goarch=amd64; rustup_sha_var=RUSTUP_SHA256_X86_64 ;;
+            aarch64) goarch=arm64; rustup_sha_var=RUSTUP_SHA256_AARCH64 ;;
+            *) echo "::error::unknown arch $ARCH"; exit 1 ;;
+          esac
+          arg() { sed -n "s/^ARG $1=//p" "$CONTEXT/Containerfile"; }
+          base="$(awk '/^FROM /{print $2; exit}' "$CONTEXT/Containerfile")"
+          base_ref="${base%@*}"
+          base_index="${base#*@}"
+          base_platform_digest="$(docker buildx imagetools inspect --raw "$base" \
+            | jq -r --arg a "$goarch" '[.manifests[] | select(.platform.os=="linux" and .platform.architecture==$a)][0].digest // empty')"
+          [ -n "$base_platform_digest" ] || { echo "::error::no linux/$goarch manifest in base index"; exit 1; }
+          jq -n \
+            --arg base_ref "$base_ref" \
+            --arg base_index "$base_index" \
+            --arg base_platform "linux/$goarch" \
+            --arg base_platform_digest "$base_platform_digest" \
+            --arg rustup_version "$(arg RUSTUP_VERSION)" \
+            --arg rustup_sha256 "$(arg "$rustup_sha_var")" \
+            --arg rust_version "$(arg RUST_VERSION)" \
+            --arg sccache_version "$(arg SCCACHE_VERSION)" \
+            --arg requirements_sha256 "$(sha256sum "$CONTEXT/requirements-builder.txt" | cut -d' ' -f1)" \
+            --arg apk_lock_sha256 "$(sha256sum "$CONTEXT/apk.lock.$ARCH" | cut -d' ' -f1)" \
+            --arg builder_image "$IMAGE@$DIGEST" \
+            --arg commit "$COMMIT" \
+            '{base_image_ref:$base_ref, base_image_index_digest:$base_index, base_platform:$base_platform,
+              base_platform_manifest_digest:$base_platform_digest, rustup_version:$rustup_version,
+              rustup_sha256:$rustup_sha256, rust_version:$rust_version, sccache_version:$sccache_version,
+              requirements_builder_sha256:$requirements_sha256, apk_lock_sha256:$apk_lock_sha256,
+              builder_image:$builder_image, source_commit:$commit}' > "builder-inputs.$ARCH.json"
+          cat "builder-inputs.$ARCH.json"
+
+      - name: Upload digest and inputs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: image-digest-${{ matrix.arch }}
-          path: image.digest.${{ matrix.arch }}
+          path: |
+            image.digest.${{ matrix.arch }}
+            builder-inputs.${{ matrix.arch }}.json
