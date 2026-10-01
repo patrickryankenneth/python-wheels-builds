@@ -39,7 +39,7 @@ jobs:
       WANT: ${{ inputs.policy_version }}
       SIGNER_IDENTITY: ${{ vars.POLICY_SIGNER_IDENTITY }}
       SIGNER_ISSUER: ${{ vars.POLICY_SIGNER_ISSUER }}
-      GITSIGN_VERSION: v0.14.0 # verify this is the version you want before first use
+      GITSIGN_REF: dd51a25b4f9fa103ca6f5cdca4183fa15cb3e627 # v0.14.0
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -99,7 +99,7 @@ jobs:
             exit 1
           fi
           # Go is preinstalled on ubuntu-latest runners.
-          go install "github.com/sigstore/gitsign@${GITSIGN_VERSION}"
+          go install "github.com/sigstore/gitsign@${GITSIGN_REF}"
           export PATH="$(go env GOPATH)/bin:$PATH"
           gitsign verify-tag \
             --certificate-identity "$SIGNER_IDENTITY" \
