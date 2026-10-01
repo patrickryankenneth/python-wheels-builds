@@ -26,3 +26,6 @@ recipes/*/.work/
 recipes/*/dist/
 recipes/*/logs/
 *.log
+!environments/alpine-3.20-musl/requirements-builder.*
+!environments/alpine-3.20-musl/apk.lock.*
+!environments/alpine-3.20-musl/image.digest.*
