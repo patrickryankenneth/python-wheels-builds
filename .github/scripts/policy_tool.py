@@ -9,7 +9,7 @@ trailing newline) so the same policy always hashes the same.
 
 POLICY.md is generated from policy.json; `check-md` fails on drift.
 
-Subcommands: lint | fmt | render-md | check-md | hash | version | stage <dir>
+Subcommands: lint | fmt | render-md | check-md | hash | version | mode | stage <dir>
 Pure stdlib. Prints ::error:: lines so failures show up in Actions logs.
 """
 import argparse
@@ -20,7 +20,8 @@ import shutil
 import sys
 from pathlib import Path
 
-VERSION_RE = re.compile(r"^v[1-9][0-9]*$")
+ENFORCED_VERSION_RE = re.compile(r"^v[1-9][0-9]*$")
+LEGACY_VERSION_RE = re.compile(r"^legacy-[0-9]{4}-(0[1-9]|1[0-2])$")
 RULE_ID_RE = re.compile(r"^[A-Z]{3,4}-[0-9]+$")
 MODES = ("descriptive", "enforced")
 STATUSES = ("performed-at-build", "verified-at-release", "declared", "enforced")
@@ -64,10 +65,15 @@ def validate(obj) -> list[str]:
         return errs
     if obj["schema"] != 1:
         errs.append("schema must be 1")
-    if not (isinstance(obj["policy_version"], str) and VERSION_RE.match(obj["policy_version"])):
-        errs.append("policy_version must look like v1, v2, ...")
     if obj["enforcement_mode"] not in MODES:
         errs.append(f"enforcement_mode must be one of {MODES}")
+    ver = obj["policy_version"]
+    if not isinstance(ver, str):
+        errs.append("policy_version must be a string")
+    elif obj["enforcement_mode"] == "enforced" and not ENFORCED_VERSION_RE.match(ver):
+        errs.append("enforced policies must be versioned v1, v2, ...")
+    elif obj["enforcement_mode"] == "descriptive" and not LEGACY_VERSION_RE.match(ver):
+        errs.append("descriptive policies must be versioned legacy-YYYY-MM (v1, v2, ... are reserved for enforced policies)")
     if not (isinstance(obj["legacy_aliases"], list) and all(isinstance(a, str) for a in obj["legacy_aliases"])):
         errs.append("legacy_aliases must be a list of strings")
     if not (isinstance(obj["summary"], str) and obj["summary"].strip()):
@@ -170,6 +176,11 @@ def cmd_version(a) -> None:
     print(obj["policy_version"])
 
 
+def cmd_mode(a) -> None:
+    _, obj = load(a.policy)
+    print(obj["enforcement_mode"])
+
+
 def cmd_stage(a) -> None:
     cmd_lint(a)
     cmd_check_md(a)
@@ -187,7 +198,8 @@ def main() -> None:
     p.add_argument("--md", type=Path, default=Path("policy/POLICY.md"))
     sub = p.add_subparsers(dest="cmd", required=True)
     for name, fn in (("lint", cmd_lint), ("fmt", cmd_fmt), ("render-md", cmd_render_md),
-                     ("check-md", cmd_check_md), ("hash", cmd_hash), ("version", cmd_version)):
+                     ("check-md", cmd_check_md), ("hash", cmd_hash), ("version", cmd_version),
+                     ("mode", cmd_mode)):
         sub.add_parser(name).set_defaults(fn=fn)
     s = sub.add_parser("stage")
     s.add_argument("outdir", type=Path)

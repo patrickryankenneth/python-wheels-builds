@@ -4,15 +4,17 @@ name: release-policy
 # Manual only, from main, behind the `policy-release` environment (create it
 # in repo Settings -> Environments with required reviewers). Gitsign on the
 # commit says who wrote the policy; this release says it is the frozen rule
-# set. Nothing here publishes automatically.
+# set. Nothing here publishes automatically. Descriptive (legacy-*) policies
+# are published without a provenance attestation so they cannot be mistaken
+# for an enforcement contract; enforced (vN) policies are attested.
 
 on:
   workflow_dispatch:
     inputs:
       policy_version:
-        description: "Policy version to freeze; must equal policy_version in policy/policy.json (e.g. v1)"
+        description: "Policy version to freeze; must equal policy_version in policy/policy.json (legacy-2026-09, or v1 for the first enforcing policy)"
         required: true
-        default: "v1"
+        default: "legacy-2026-09"
 
 permissions:
   contents: read
@@ -72,14 +74,19 @@ jobs:
           python-version: "3.11"
 
       - name: Stage release assets
-        run: python3 .github/scripts/policy_tool.py stage policy-release
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/policy_tool.py stage policy-release
+          echo "MODE=$(python3 .github/scripts/policy_tool.py mode)" >> "$GITHUB_ENV"
 
       - name: Attest build provenance (policy.json)
+        if: env.MODE == 'enforced'
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
           subject-path: policy-release/policy.json
 
       - name: Verify attestation and attach bundle
+        if: env.MODE == 'enforced'
         run: |
           set -euo pipefail
           signer="${GITHUB_REPOSITORY}/.github/workflows/release-policy.yml"
@@ -100,14 +107,19 @@ jobs:
         run: |
           set -euo pipefail
           tag="policy-${WANT}"
+          files=(policy-release/policy.json policy-release/POLICY.md policy-release/policy.json.sha256)
+          want="POLICY.md,policy.json,policy.json.sha256"
+          if [ "$MODE" = "enforced" ]; then
+            files+=(policy-release/policy.json.attestations.jsonl)
+            want="POLICY.md,policy.json,policy.json.attestations.jsonl,policy.json.sha256"
+            notes="Frozen enforcing policy ${WANT} (sha256 in policy.json.sha256). Verify: gh attestation verify policy.json --repo ${GITHUB_REPOSITORY} --signer-workflow ${GITHUB_REPOSITORY}/.github/workflows/release-policy.yml"
+          else
+            notes="Historical description ${WANT} (sha256 in policy.json.sha256). Describes what earlier releases did. Not consumed by builds, not an enforcement contract, and not evidence that any policy was enforced."
+          fi
           gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
-            --title "Policy ${WANT}" \
-            --notes "Frozen policy ${WANT} (sha256 in policy.json.sha256). Verify: gh attestation verify policy.json --repo ${GITHUB_REPOSITORY} --signer-workflow ${GITHUB_REPOSITORY}/.github/workflows/release-policy.yml"
-          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" \
-            policy-release/policy.json policy-release/POLICY.md \
-            policy-release/policy.json.sha256 policy-release/policy.json.attestations.jsonl
+            --title "Policy ${WANT}" --notes "$notes"
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" "${files[@]}"
           got="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '[.assets[].name] | sort | join(",")')"
-          want="POLICY.md,policy.json,policy.json.attestations.jsonl,policy.json.sha256"
           if [ "$got" != "$want" ]; then
             echo "::error::asset set mismatch: got '$got', want '$want' - not publishing"
             exit 1
@@ -128,6 +140,8 @@ jobs:
           cmp published/policy.json policy-release/policy.json
           cmp published/POLICY.md policy-release/POLICY.md
           (cd published && sha256sum -c policy.json.sha256)
-          gh attestation verify published/policy.json --repo "$GITHUB_REPOSITORY" \
-            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release-policy.yml"
+          if [ "$MODE" = "enforced" ]; then
+            gh attestation verify published/policy.json --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release-policy.yml"
+          fi
           echo "Published $tag: $(sha256sum published/policy.json | cut -d' ' -f1)"
