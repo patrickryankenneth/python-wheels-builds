@@ -1,20 +1,31 @@
 name: release-policy
 
 # Freezes policy/policy.json as an immutable release `policy-<version>`.
-# Manual only, from main, behind the `policy-release` environment (create it
-# in repo Settings -> Environments with required reviewers). Gitsign on the
-# commit says who wrote the policy; this release says it is the frozen rule
-# set. Nothing here publishes automatically. Descriptive (legacy-*) policies
-# are published without a provenance attestation so they cannot be mistaken
-# for an enforcement contract; enforced (vN) policies are attested.
+#
+# Trust model (who vouches for what):
+#   commit   GPG-signed by the author            -> who wrote the policy
+#   tag      gitsign (Sigstore OIDC) annotated   -> who approved this exact commit as a release
+#   build    this workflow + GitHub attestation  -> these bytes were produced by this workflow
+#   release  SHA256SUMS.sigstore.json, keyless cosign signed ON THE MAINTAINER'S
+#            WORKSTATION (sign-release.sh) -> a human approved these exact bytes
+#
+# This workflow NEVER publishes. It stops at a draft release. The maintainer
+# downloads the draft, verifies it, signs SHA256SUMS, uploads the bundle and
+# publishes by hand (immutable releases: nothing can be swapped afterwards).
+#
+# Manual only, from main, behind the `policy-release` environment.
+# Enforced (vN) policies need a pre-existing gitsign-signed annotated tag
+# `policy-vN` pointing at the build SHA, verified here against the identity
+# pinned in repository variables POLICY_SIGNER_IDENTITY / POLICY_SIGNER_ISSUER.
+# Descriptive (legacy-*) policies need no tag and carry no provenance
+# attestation, so they cannot be mistaken for an enforcement contract.
 
 on:
   workflow_dispatch:
     inputs:
       policy_version:
-        description: "Policy version to freeze; must equal policy_version in policy/policy.json (legacy-2026-09, or v1 for the first enforcing policy)"
+        description: "Policy version to freeze; must equal policy_version in policy/policy.json (e.g. v1)"
         required: true
-        default: "legacy-2026-09"
 
 permissions:
   contents: read
@@ -26,9 +37,14 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       WANT: ${{ inputs.policy_version }}
+      SIGNER_IDENTITY: ${{ vars.POLICY_SIGNER_IDENTITY }}
+      SIGNER_ISSUER: ${{ vars.POLICY_SIGNER_ISSUER }}
+      GITSIGN_VERSION: v0.13.0 # verify this is the version you want before first use
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -45,6 +61,7 @@ jobs:
             echo "::error::input policy_version '$WANT' != policy.json policy_version '$have'"
             exit 1
           fi
+          echo "MODE=$(python3 .github/scripts/policy_tool.py mode)" >> "$GITHUB_ENV"
 
       - name: Refuse if this policy release already exists
         run: |
@@ -53,7 +70,43 @@ jobs:
             exit 1
           fi
 
-  publish:
+      - name: Require annotated tag on the build commit (enforced only)
+        if: env.MODE == 'enforced'
+        run: |
+          set -euo pipefail
+          tag="policy-${WANT}"
+          git fetch --force --tags origin
+          if ! git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "::error::tag ${tag} not found - create it locally with your gitsign tag alias and push it first"
+            exit 1
+          fi
+          if [ "$(git cat-file -t "refs/tags/${tag}")" != "tag" ]; then
+            echo "::error::${tag} is a lightweight tag - it must be an annotated, signed tag"
+            exit 1
+          fi
+          commit="$(git rev-parse "refs/tags/${tag}^{commit}")"
+          if [ "$commit" != "$GITHUB_SHA" ]; then
+            echo "::error::tag ${tag} points at ${commit}, but this run builds ${GITHUB_SHA}"
+            exit 1
+          fi
+
+      - name: Verify tag gitsign signature against pinned identity (enforced only)
+        if: env.MODE == 'enforced'
+        run: |
+          set -euo pipefail
+          if [ -z "${SIGNER_IDENTITY:-}" ] || [ -z "${SIGNER_ISSUER:-}" ]; then
+            echo "::error::set repository variables POLICY_SIGNER_IDENTITY and POLICY_SIGNER_ISSUER (Settings -> Secrets and variables -> Actions -> Variables)"
+            exit 1
+          fi
+          # Go is preinstalled on ubuntu-latest runners.
+          go install "github.com/sigstore/gitsign@${GITSIGN_VERSION}"
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          gitsign verify-tag \
+            --certificate-identity "$SIGNER_IDENTITY" \
+            --certificate-oidc-issuer "$SIGNER_ISSUER" \
+            "policy-${WANT}"
+
+  draft:
     needs: check
     runs-on: ubuntu-latest
     environment: policy-release
@@ -67,6 +120,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -78,6 +133,14 @@ jobs:
           set -euo pipefail
           python3 .github/scripts/policy_tool.py stage policy-release
           echo "MODE=$(python3 .github/scripts/policy_tool.py mode)" >> "$GITHUB_ENV"
+
+      - name: Re-check tag still points at the build commit (enforced only)
+        if: env.MODE == 'enforced'
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin
+          commit="$(git rev-parse "refs/tags/policy-${WANT}^{commit}")"
+          [ "$commit" = "$GITHUB_SHA" ] || { echo "::error::tag moved: $commit != $GITHUB_SHA"; exit 1; }
 
       - name: Attest build provenance (policy.json)
         if: env.MODE == 'enforced'
@@ -103,7 +166,7 @@ jobs:
           # gh names the bundle sha256:<hex>.jsonl in the cwd
           mv "sha256:${digest}.jsonl" policy-release/policy.json.attestations.jsonl
 
-      - name: Draft, upload, verify asset set, publish
+      - name: Create DRAFT release, upload, verify asset set (never publishes)
         run: |
           set -euo pipefail
           tag="policy-${WANT}"
@@ -112,36 +175,43 @@ jobs:
           if [ "$MODE" = "enforced" ]; then
             files+=(policy-release/policy.json.attestations.jsonl)
             want="POLICY.md,policy.json,policy.json.attestations.jsonl,policy.json.sha256"
-            notes="Frozen enforcing policy ${WANT} (sha256 in policy.json.sha256). Verify: gh attestation verify policy.json --repo ${GITHUB_REPOSITORY} --signer-workflow ${GITHUB_REPOSITORY}/.github/workflows/release-policy.yml"
+            notes="Frozen enforcing policy ${WANT} (sha256 in policy.json.sha256). Verify: gh attestation verify policy.json --repo ${GITHUB_REPOSITORY} --signer-workflow ${GITHUB_REPOSITORY}/.github/workflows/release-policy.yml ; then verify SHA256SUMS with cosign verify-blob --bundle SHA256SUMS.sigstore.json (identity and issuer are pinned in the repo variables)."
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+              --title "Policy ${WANT}" --notes "$notes"
           else
             notes="Historical description ${WANT} (sha256 in policy.json.sha256). Describes what earlier releases did. Not consumed by builds, not an enforcement contract, and not evidence that any policy was enforced."
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
+              --title "Policy ${WANT}" --notes "$notes"
           fi
-          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
-            --title "Policy ${WANT}" --notes "$notes"
           gh release upload "$tag" --repo "$GITHUB_REPOSITORY" "${files[@]}"
           got="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '[.assets[].name] | sort | join(",")')"
           if [ "$got" != "$want" ]; then
-            echo "::error::asset set mismatch: got '$got', want '$want' - not publishing"
+            echo "::error::asset set mismatch: got '$got', want '$want'"
             exit 1
           fi
-          target="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json targetCommitish --jq .targetCommitish)"
-          if [ "$target" != "$GITHUB_SHA" ]; then
-            echo "::error::release target $target != $GITHUB_SHA - not publishing"
-            exit 1
-          fi
-          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false
 
-      - name: Re-download published assets and compare
+      - name: Re-download draft assets and compare
         run: |
           set -euo pipefail
           tag="policy-${WANT}"
-          mkdir -p published
-          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir published
-          cmp published/policy.json policy-release/policy.json
-          cmp published/POLICY.md policy-release/POLICY.md
-          (cd published && sha256sum -c policy.json.sha256)
+          mkdir -p drafted
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir drafted
+          cmp drafted/policy.json policy-release/policy.json
+          cmp drafted/POLICY.md policy-release/POLICY.md
+          (cd drafted && sha256sum -c policy.json.sha256)
           if [ "$MODE" = "enforced" ]; then
-            gh attestation verify published/policy.json --repo "$GITHUB_REPOSITORY" \
+            gh attestation verify drafted/policy.json --repo "$GITHUB_REPOSITORY" \
               --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release-policy.yml"
           fi
-          echo "Published $tag: $(sha256sum published/policy.json | cut -d' ' -f1)"
+          {
+            echo "### Draft policy-${WANT} is ready - NOT published"
+            echo
+            echo "sha256 \`$(sha256sum drafted/policy.json | cut -d' ' -f1)\`"
+            echo
+            echo "On your workstation (needs cosign, gh, and a browser for the Sigstore login):"
+            echo
+            echo '```'
+            echo "export SIGNER_IDENTITY=<your email>  SIGNER_ISSUER=<issuer>"
+            echo "sign-release.sh policy-${WANT}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
