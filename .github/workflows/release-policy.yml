@@ -39,7 +39,7 @@ jobs:
       WANT: ${{ inputs.policy_version }}
       SIGNER_IDENTITY: ${{ vars.POLICY_SIGNER_IDENTITY }}
       SIGNER_ISSUER: ${{ vars.POLICY_SIGNER_ISSUER }}
-      GITSIGN_VERSION: v0.13.0 # verify this is the version you want before first use
+      GITSIGN_VERSION: v0.14.0 # verify this is the version you want before first use
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
