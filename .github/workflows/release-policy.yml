@@ -1,0 +1,133 @@
+name: release-policy
+
+# Freezes policy/policy.json as an immutable release `policy-<version>`.
+# Manual only, from main, behind the `policy-release` environment (create it
+# in repo Settings -> Environments with required reviewers). Gitsign on the
+# commit says who wrote the policy; this release says it is the frozen rule
+# set. Nothing here publishes automatically.
+
+on:
+  workflow_dispatch:
+    inputs:
+      policy_version:
+        description: "Policy version to freeze; must equal policy_version in policy/policy.json (e.g. v1)"
+        required: true
+        default: "v1"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      WANT: ${{ inputs.policy_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Lint policy and generated POLICY.md
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/policy_tool.py lint
+          python3 .github/scripts/policy_tool.py check-md
+          have="$(python3 .github/scripts/policy_tool.py version)"
+          if [ "$have" != "$WANT" ]; then
+            echo "::error::input policy_version '$WANT' != policy.json policy_version '$have'"
+            exit 1
+          fi
+
+      - name: Refuse if this policy release already exists
+        run: |
+          if gh release view "policy-${WANT}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::release policy-${WANT} already exists - policies are never overwritten, bump policy_version"
+            exit 1
+          fi
+
+  publish:
+    needs: check
+    runs-on: ubuntu-latest
+    environment: policy-release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      WANT: ${{ inputs.policy_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Stage release assets
+        run: python3 .github/scripts/policy_tool.py stage policy-release
+
+      - name: Attest build provenance (policy.json)
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: policy-release/policy.json
+
+      - name: Verify attestation and attach bundle
+        run: |
+          set -euo pipefail
+          signer="${GITHUB_REPOSITORY}/.github/workflows/release-policy.yml"
+          ok=0
+          for i in 1 2 3 4 5 6; do
+            if gh attestation verify policy-release/policy.json --repo "$GITHUB_REPOSITORY" --signer-workflow "$signer"; then
+              ok=1; break
+            fi
+            echo "attestation not visible yet (try $i), waiting"; sleep 10
+          done
+          [ "$ok" = 1 ] || { echo "::error::could not verify policy.json attestation"; exit 1; }
+          digest="$(sha256sum policy-release/policy.json | cut -d' ' -f1)"
+          gh attestation download policy-release/policy.json --repo "$GITHUB_REPOSITORY"
+          # gh names the bundle sha256:<hex>.jsonl in the cwd
+          mv "sha256:${digest}.jsonl" policy-release/policy.json.attestations.jsonl
+
+      - name: Draft, upload, verify asset set, publish
+        run: |
+          set -euo pipefail
+          tag="policy-${WANT}"
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
+            --title "Policy ${WANT}" \
+            --notes "Frozen policy ${WANT} (sha256 in policy.json.sha256). Verify: gh attestation verify policy.json --repo ${GITHUB_REPOSITORY} --signer-workflow ${GITHUB_REPOSITORY}/.github/workflows/release-policy.yml"
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" \
+            policy-release/policy.json policy-release/POLICY.md \
+            policy-release/policy.json.sha256 policy-release/policy.json.attestations.jsonl
+          got="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '[.assets[].name] | sort | join(",")')"
+          want="POLICY.md,policy.json,policy.json.attestations.jsonl,policy.json.sha256"
+          if [ "$got" != "$want" ]; then
+            echo "::error::asset set mismatch: got '$got', want '$want' - not publishing"
+            exit 1
+          fi
+          target="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json targetCommitish --jq .targetCommitish)"
+          if [ "$target" != "$GITHUB_SHA" ]; then
+            echo "::error::release target $target != $GITHUB_SHA - not publishing"
+            exit 1
+          fi
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false
+
+      - name: Re-download published assets and compare
+        run: |
+          set -euo pipefail
+          tag="policy-${WANT}"
+          mkdir -p published
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir published
+          cmp published/policy.json policy-release/policy.json
+          cmp published/POLICY.md policy-release/POLICY.md
+          (cd published && sha256sum -c policy.json.sha256)
+          gh attestation verify published/policy.json --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release-policy.yml"
+          echo "Published $tag: $(sha256sum published/policy.json | cut -d' ' -f1)"
