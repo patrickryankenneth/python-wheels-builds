@@ -51,7 +51,7 @@ jobs:
       DBT_OSS_TAG: ${{ inputs.dbt_oss_tag || 'v2.0.5' }}
       PACKAGE_TARGETS: ${{ inputs.package_targets || 'both' }}
       COLD_CACHE: ${{ inputs.cold_cache || '0' }}
-      IMAGE: ghcr.io/${{ github.repository_owner }}/pywheels-alpine-builder
+      IMAGE: ghcr.io/patrickryankenneth/python-wheels-builder-alpine
     outputs:
       tag: ${{ env.DBT_OSS_TAG }}
       upstream_sha: ${{ steps.checkout_verify.outputs.sha }}
@@ -67,13 +67,9 @@ jobs:
             ~/pywheels-cache/cargo-git
             ~/pywheels-cache/cargo-target
             ~/pywheels-cache/sccache
-          key: >-
-            pywheels-musllinux-
-            ${{ hashFiles('environments/alpine-3.20-musl/Containerfile') }}-
-            ${{ env.DBT_OSS_TAG }}
+          key: pywheels-musllinux-${{ hashFiles('builder.lock') }}-${{ env.DBT_OSS_TAG }}
           restore-keys: |
-            pywheels-musllinux-${{ hashFiles('environments/alpine-3.20-musl/Containerfile') }}-
-            pywheels-musllinux-
+            pywheels-musllinux-${{ hashFiles('builder.lock') }}-
 
       - name: Prepare cache dirs
         run: |
@@ -86,12 +82,26 @@ jobs:
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-      - name: Pull builder image
+      - name: Install cosign
+        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
+
+      # Fails closed: verify-builder.sh checks the signed release, every
+      # asset hash, the digest against builder.lock and the attestations,
+      # then prints the digest-pinned image ref as its last line. Nothing
+      # is pulled by tag, and there is no fallback image.
+      - name: Verify builder release, then pull by digest
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          docker pull "${IMAGE}:${{ hashFiles('environments/alpine-3.20-musl/Containerfile') }}" \
-            || docker pull "${IMAGE}:latest"
-          docker tag "${IMAGE}:${{ hashFiles('environments/alpine-3.20-musl/Containerfile') }}" pywheels-alpine-builder \
-            || docker tag "${IMAGE}:latest" pywheels-alpine-builder
+          set -euo pipefail
+          OUT=$(./verify-builder.sh x86_64 | tee /dev/stderr)
+          REF=$(printf '%s\n' "$OUT" | tail -n1)
+          case "$REF" in
+            "${IMAGE}@sha256:"*) ;;
+            *) echo "unexpected builder ref: '$REF'" >&2; exit 1 ;;
+          esac
+          docker pull "$REF"
+          echo "BUILDER_REF=$REF" >> "$GITHUB_ENV"
 
       # No --user here on purpose: RUSTUP_HOME=/opt/rustup and
       # CARGO_HOME=/opt/cargo are baked into the image as root-owned
@@ -110,6 +120,7 @@ jobs:
           docker run --rm \
             -e RUSTFLAGS="--cap-lints=warn" \
             -e CARGO_LOG="cargo::core::compiler::fingerprint=info" \
+            -e RUSTUP_AUTO_INSTALL=0 \
             -e DBT_OSS_TAG="${DBT_OSS_TAG}" \
             -e PACKAGE_TARGETS="${PACKAGE_TARGETS}" \
             -e COLD_CACHE="${COLD_CACHE}" \
@@ -120,7 +131,7 @@ jobs:
             -v ~/pywheels-cache/sccache:/sccache \
             -v "${{ github.workspace }}/recipes/dbt-oss:/build" \
             -v "${{ github.workspace }}/.github/scripts:/scripts:ro" \
-            pywheels-alpine-builder \
+            "$BUILDER_REF" \
             sh /build/build.sh
 
       # build.sh (via checkout_verify.py) wrote plain KEY=VALUE lines to
@@ -142,14 +153,14 @@ jobs:
       # cache progress it made (e.g. registry/index fetches) on top of
       # the actual failure.
       - name: Fix cache dir ownership for cache save
-        if: always()
+        if: always() && env.BUILDER_REF != ''
         run: |
           docker run --rm \
             -v ~/pywheels-cache/cargo-registry:/opt/cargo/registry \
             -v ~/pywheels-cache/cargo-git:/opt/cargo/git \
             -v ~/pywheels-cache/cargo-target:/cargo-target \
             -v ~/pywheels-cache/sccache:/sccache \
-            pywheels-alpine-builder \
+            "$BUILDER_REF" \
             chown -R "$(id -u):$(id -g)" /opt/cargo/registry /opt/cargo/git /cargo-target /sccache
 
       - name: Upload wheels
