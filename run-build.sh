@@ -17,6 +17,7 @@ echo "== pulling $REF" >&2
 $ENGINE pull "$REF" >&2
 
 W=$(mktemp -d)
+echo "workdir: $W" >&2
 git -C "$ROOT" archive HEAD recipes/dbt-oss .github/scripts | tar -x -C "$W"
 for d in cargo-registry cargo-git cargo-target sccache; do mkdir -p "$W/cache/$d"; done
 
@@ -26,6 +27,8 @@ $ENGINE run --rm \
     -e DBT_OSS_TAG="${DBT_OSS_TAG:-v2.0.5}" \
     -e PACKAGE_TARGETS="${PACKAGE_TARGETS:-both}" \
     -e COLD_CACHE=1 \
+    -e RUSTUP_AUTO_INSTALL=0 \
+    ${RUSTUP_TOOLCHAIN:+-e RUSTUP_TOOLCHAIN=$RUSTUP_TOOLCHAIN} \
     -e POLICY_VERSION="${POLICY_VERSION:-local-unverified}" \
     -v "$W/cache/cargo-registry:/opt/cargo/registry" \
     -v "$W/cache/cargo-git:/opt/cargo/git" \

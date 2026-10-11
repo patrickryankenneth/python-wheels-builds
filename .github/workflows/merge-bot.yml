@@ -141,12 +141,18 @@ jobs:
           # aggregate check reports neutral while results are still being
           # processed) mean "not settled yet": retry. Anything else that is
           # not success is a hard fail. Timeout fails closed.
+          py_changed=$(gh api "repos/$GITHUB_REPOSITORY/pulls/${{ github.event.pull_request.number }}/files" --paginate --jq '.[].filename' | grep -cE '\.py$' || true)
+          echo "python files changed in PR: $py_changed"
           for i in $(seq 1 20); do
             ok=1
             for name in "CodeQL" "Analyze (actions)" "Analyze (python)"; do
               c=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs?per_page=100" \
                 --jq "[.check_runs[] | select(.name == \"$name\")] | sort_by(.started_at) | last | if . == null or .status != \"completed\" then \"none\" else .conclusion // \"none\" end")
               echo "attempt $i: $name: $c"
+              if [ "$name" = "Analyze (python)" ] && [ "$py_changed" = "0" ] && [ "$c" = "none" ]; then
+                echo "  no .py files changed, python analysis was not scheduled: not required"
+                continue
+              fi
               case "$c" in
                 success) ;;
                 none|null|neutral) ok=0 ;;

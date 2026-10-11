@@ -86,13 +86,15 @@ jobs:
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-      - name: Pull builder image
+      - name: Install cosign
+        uses: sigstore/cosign-installer@<SHA of the version you pick>  # pin like the other actions
+      - name: Verify builder release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          docker pull "${IMAGE}:${{ hashFiles('environments/alpine-3.20-musl/Containerfile') }}" \
-            || docker pull "${IMAGE}:latest"
-          docker tag "${IMAGE}:${{ hashFiles('environments/alpine-3.20-musl/Containerfile') }}" pywheels-alpine-builder \
-            || docker tag "${IMAGE}:latest" pywheels-alpine-builder
-
+          REF=$(./verify-builder.sh x86_64 | tail -n1)
+          docker pull "$REF"
+          echo "BUILDER_REF=$REF" >> "$GITHUB_ENV"
       # No --user here on purpose: RUSTUP_HOME=/opt/rustup and
       # CARGO_HOME=/opt/cargo are baked into the image as root-owned
       # during the Containerfile build (rustup/cargo installed as root).

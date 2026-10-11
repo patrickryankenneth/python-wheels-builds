@@ -19,6 +19,11 @@ if ! command -v protoc >/dev/null 2>&1; then
 fi
 echo "protoc: $(protoc --version)"
 
+# Use the builder image's own toolchain; never let rustup download one.
+RUSTUP_AUTO_INSTALL=0; export RUSTUP_AUTO_INSTALL
+RUSTUP_TOOLCHAIN="$(rustup toolchain list | head -n1 | cut -d' ' -f1)"; export RUSTUP_TOOLCHAIN
+echo "rustc: $(rustc --version) (toolchain $RUSTUP_TOOLCHAIN)"
+
 echo "== Resolving, checking out, and verifying $DBT_OSS_TAG on $REPO_URL =="
 python3 /scripts/checkout_verify.py \
     --repo-url "$REPO_URL" \
@@ -32,6 +37,14 @@ python3 /scripts/checkout_verify.py \
 # checkout_verify.py wrote plain KEY=VALUE lines - safe to source directly.
 . ./checkout-verify-outputs.env
 echo "Resolved commit: $sha"
+
+# Fail (never substitute) if the image's compiler is not what upstream asks for.
+WANT=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' dbt-oss/rust-toolchain.toml)
+HAVE=$(rustc --version | cut -d' ' -f2)
+case "$HAVE" in "$WANT"|"$WANT".*) ;; *)
+    echo "toolchain mismatch: upstream wants '$WANT', image has $HAVE" >&2; exit 1 ;;
+esac
+echo "rustc $HAVE satisfies upstream channel $WANT"
 
 cd dbt-oss/crates/dbt-sa-python
 PYPROJECT="$(pwd)/pyproject.toml"
