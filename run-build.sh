@@ -10,7 +10,9 @@ ARCH="${1:-x86_64}"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 if command -v podman >/dev/null 2>&1; then ENGINE=podman; else ENGINE=docker; fi
 
-REF=$("$ROOT/verify-builder.sh" "$ARCH" | tail -n1)
+OUT=$("$ROOT/verify-builder.sh" "$ARCH")
+REF=$(printf '%s\n' "$OUT" | tail -n1)
+[ -n "$REF" ] || { echo "no verified image ref" >&2; exit 1; }
 echo "== pulling $REF" >&2
 $ENGINE pull "$REF" >&2
 
