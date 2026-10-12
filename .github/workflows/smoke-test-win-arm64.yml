@@ -25,7 +25,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
 
       - name: Install sccache
-        uses: mozilla-actions/sccache-action@9e326ebed976843c9932b3aa0e021c6f50310eb4 # v0.0.6
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
 
       # Resilience: sccache's GHA cache backend can have transient outages
       # (seen: "Our services aren't available right now" / HTTP 400 from
