@@ -30,6 +30,9 @@ on:
 permissions:
   contents: read
 
+env:
+  POLICY_ARGS: --policy policy/wheel-build/policy.json --md policy/wheel-build/POLICY.md --verifier .github/scripts/verify_wheel_policy.py
+
 jobs:
   check:
     if: github.ref == 'refs/heads/main'
@@ -54,19 +57,20 @@ jobs:
       - name: Lint policy and generated POLICY.md
         run: |
           set -euo pipefail
-          python3 .github/scripts/policy_tool.py lint
-          python3 .github/scripts/policy_tool.py check-md
-          have="$(python3 .github/scripts/policy_tool.py version)"
+          python3 .github/scripts/policy_tool_v2.py $POLICY_ARGS lint
+          python3 .github/scripts/policy_tool_v2.py $POLICY_ARGS check-md
+          have="$(python3 .github/scripts/policy_tool_v2.py $POLICY_ARGS version)"
           if [ "$have" != "$WANT" ]; then
             echo "::error::input policy_version '$WANT' != policy.json policy_version '$have'"
             exit 1
           fi
-          echo "MODE=$(python3 .github/scripts/policy_tool.py mode)" >> "$GITHUB_ENV"
+          echo "MODE=$(python3 .github/scripts/policy_tool_v2.py $POLICY_ARGS mode)" >> "$GITHUB_ENV"
+          echo "TAG=$(python3 .github/scripts/policy_tool_v2.py $POLICY_ARGS tag)" >> "$GITHUB_ENV"
 
       - name: Refuse if this policy release already exists
         run: |
-          if gh release view "policy-${WANT}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "::error::release policy-${WANT} already exists - policies are never overwritten, bump policy_version"
+          if gh release view "${TAG}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::release ${TAG} already exists - policies are never overwritten, bump policy_version"
             exit 1
           fi
 
@@ -74,7 +78,7 @@ jobs:
         if: env.MODE == 'enforced'
         run: |
           set -euo pipefail
-          tag="policy-${WANT}"
+          tag="${TAG}"
           git fetch --force --tags origin
           if ! git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
             echo "::error::tag ${tag} not found - create it locally with your gitsign tag alias and push it first"
@@ -104,7 +108,7 @@ jobs:
           gitsign verify-tag \
             --certificate-identity "$SIGNER_IDENTITY" \
             --certificate-oidc-issuer "$SIGNER_ISSUER" \
-            "policy-${WANT}"
+            "${TAG}"
 
   draft:
     needs: check
@@ -131,15 +135,16 @@ jobs:
       - name: Stage release assets
         run: |
           set -euo pipefail
-          python3 .github/scripts/policy_tool.py stage policy-release
-          echo "MODE=$(python3 .github/scripts/policy_tool.py mode)" >> "$GITHUB_ENV"
+          python3 .github/scripts/policy_tool_v2.py $POLICY_ARGS stage policy-release
+          echo "MODE=$(python3 .github/scripts/policy_tool_v2.py $POLICY_ARGS mode)" >> "$GITHUB_ENV"
+          echo "TAG=$(python3 .github/scripts/policy_tool_v2.py $POLICY_ARGS tag)" >> "$GITHUB_ENV"
 
       - name: Re-check tag still points at the build commit (enforced only)
         if: env.MODE == 'enforced'
         run: |
           set -euo pipefail
           git fetch --force --tags origin
-          commit="$(git rev-parse "refs/tags/policy-${WANT}^{commit}")"
+          commit="$(git rev-parse "refs/tags/${TAG}^{commit}")"
           [ "$commit" = "$GITHUB_SHA" ] || { echo "::error::tag moved: $commit != $GITHUB_SHA"; exit 1; }
 
       - name: Attest build provenance (policy.json)
@@ -169,7 +174,7 @@ jobs:
       - name: Create DRAFT release, upload, verify asset set (never publishes)
         run: |
           set -euo pipefail
-          tag="policy-${WANT}"
+          tag="${TAG}"
           files=(policy-release/policy.json policy-release/POLICY.md policy-release/policy.json.sha256)
           want="POLICY.md,policy.json,policy.json.sha256"
           if [ "$MODE" = "enforced" ]; then
@@ -193,7 +198,7 @@ jobs:
       - name: Re-download draft assets and compare
         run: |
           set -euo pipefail
-          tag="policy-${WANT}"
+          tag="${TAG}"
           mkdir -p drafted
           gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir drafted
           cmp drafted/policy.json policy-release/policy.json
@@ -204,7 +209,7 @@ jobs:
               --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release-policy.yml"
           fi
           {
-            echo "### Draft policy-${WANT} is ready - NOT published"
+            echo "### Draft ${TAG} is ready - NOT published"
             echo
             echo "sha256 \`$(sha256sum drafted/policy.json | cut -d' ' -f1)\`"
             echo
@@ -212,6 +217,6 @@ jobs:
             echo
             echo '```'
             echo "export SIGNER_IDENTITY=<your email>  SIGNER_ISSUER=<issuer>"
-            echo "sign-release.sh policy-${WANT}"
+            echo "sign-release.sh ${TAG}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

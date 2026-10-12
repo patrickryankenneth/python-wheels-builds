@@ -42,7 +42,7 @@ env:
   # so it's signed as part of the attestation - not just a label here.
   # Kept identical to build-dbt-oss-win-arm64.yml's value since both
   # platforms build the same upstream commit under the same policy today.
-  POLICY_VERSION: 2026-09-sha-pinned-v1
+  POLICY_VERSION: v1
 
 jobs:
   build:
@@ -117,7 +117,10 @@ jobs:
       # the image itself - keeps the image reusable across script changes.
       - name: Run build.sh in container
         run: |
+          POLICY_SHA256="$(sha256sum policy/wheel-build/policy.json | cut -d' ' -f1)"
           docker run --rm \
+            -e BUILDER_REF="$BUILDER_REF" \
+            -e POLICY_SHA256="$POLICY_SHA256" \
             -e RUSTFLAGS="--cap-lints=warn" \
             -e CARGO_LOG="cargo::core::compiler::fingerprint=info" \
             -e RUSTUP_AUTO_INSTALL=0 \

@@ -143,8 +143,20 @@ def create_archive(clone_dir: Path, archive_dir: Path, sha: str, name_prefix: st
     return archive_name, digest
 
 
+def toolchain_version(clone_dir: Path) -> str | None:
+    """`rustc --version` as the build will see it: run from the checkout so upstream's
+    rust-toolchain.toml applies, falling back to the image default."""
+    for cwd in (clone_dir, None):
+        r = subprocess.run(["rustc", "--version"], text=True, capture_output=True, cwd=cwd)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    return None
+
+
 def write_predicate(predicate_path: Path, repo_url: str, tag: str, sha: str,
-                     policy_version: str, archive_name: str, archive_sha256: str) -> None:
+                     policy_version: str, archive_name: str, archive_sha256: str,
+                     builder_ref: str | None = None, rustc_version: str | None = None,
+                     policy_sha256: str | None = None) -> None:
     upstream_repo = repo_url[:-4] if repo_url.endswith(".git") else repo_url
     predicate = {
         "upstream_repo": upstream_repo,
@@ -155,6 +167,14 @@ def write_predicate(predicate_path: Path, repo_url: str, tag: str, sha: str,
         "snapshot_archive_name": archive_name,
         "snapshot_archive_sha256": archive_sha256,
     }
+    for k, v in (("builder_ref", builder_ref), ("rustc_version", rustc_version),
+                 ("policy_sha256", policy_sha256)):
+        if v:
+            predicate[k] = v
+    predicate["checkout_verify_sha256"] = sha256_file(Path(__file__))
+    bs = Path(os.environ.get("BUILD_SCRIPT_PATH", "/build/build.sh"))
+    if bs.is_file():
+        predicate["build_script_sha256"] = sha256_file(bs)
     predicate_path.write_text(json.dumps(predicate, indent=2) + "\n")
     print(predicate_path.read_text())
 
@@ -193,7 +213,10 @@ def main() -> None:
     normalize_mtimes(args.clone_dir, sha)
     archive_name, archive_sha256 = create_archive(args.clone_dir, args.archive_dir, sha, prefix)
     write_predicate(args.predicate_path, args.repo_url, args.tag, sha,
-                     args.policy_version, archive_name, archive_sha256)
+                     args.policy_version, archive_name, archive_sha256,
+                     builder_ref=os.environ.get("BUILDER_REF"),
+                     rustc_version=toolchain_version(args.clone_dir),
+                     policy_sha256=os.environ.get("POLICY_SHA256"))
 
     if args.outputs_file:
         write_outputs(args.outputs_file, {

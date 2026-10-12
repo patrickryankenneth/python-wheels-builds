@@ -1,0 +1,178 @@
+{
+  "enforcement_mode": "enforced",
+  "not_guaranteed": [
+    "Reproducibility or bit-identity with upstream's own CI.",
+    "Absence of vulnerabilities in the wheels or their dependencies.",
+    "Offline compilation: the build fetches crates and git dependencies.",
+    "Any audit of wheel contents beyond the checks above.",
+    "That the recorded rustc is the one that compiled: it is recorded by the checkout step in the same image before the compile.",
+    "That the build log is attested: it is released as an asset, not as an attested subject.",
+    "File modification times: they are normalized to the commit time, contents are unmodified.",
+    "The release tag is pinned to the build commit but is not signed.",
+    "The post-build tree check is logged by build.sh, not attested.",
+    "SBOM and VEX for the wheels are not part of this policy version."
+  ],
+  "policy_version": "v1",
+  "rules": [
+    {
+      "check": "check_builder_pinned",
+      "id": "BLD-1",
+      "implemented_by": "verify_wheel_policy.py check_builder_pinned",
+      "parameters": {
+        "image": "ghcr.io/patrickryankenneth/python-wheels-builder-alpine"
+      },
+      "statement": "The upstream-source attestation records the builder image as <image>@sha256:<digest>, and that digest appears in builder.lock for the wheel's architecture.",
+      "status": "enforced",
+      "title": "Builder image pinned by digest"
+    },
+    {
+      "check": "check_source_pinned",
+      "id": "BLD-2",
+      "implemented_by": "verify_wheel_policy.py check_source_pinned",
+      "parameters": {
+        "upstream_repo": "https://github.com/dbt-labs/dbt-oss"
+      },
+      "statement": "The attested upstream repo, tag and 40-hex commit match the release inputs, tree_clean is true (checked before the build; the post-build tree check is performed by build.sh and logged, not attested), and the released source archive has the attested sha256.",
+      "status": "enforced",
+      "title": "Unmodified upstream source"
+    },
+    {
+      "check": "check_toolchain",
+      "id": "BLD-3",
+      "implemented_by": "verify_wheel_policy.py check_toolchain",
+      "parameters": {
+        "toolchain_file": "rust-toolchain.toml"
+      },
+      "statement": "The attested rustc version satisfies the channel in rust-toolchain.toml of the archived upstream source. A minor channel such as 1.96 matches any 1.96.x, a full version must match exactly, and stable/beta/nightly fail.",
+      "status": "enforced",
+      "title": "Compiler satisfies upstream channel"
+    },
+    {
+      "check": "check_provenance",
+      "id": "BLD-4",
+      "implemented_by": "verify_wheel_policy.py check_provenance",
+      "parameters": {
+        "allowed_source_refs": [
+          "refs/heads/main"
+        ],
+        "workflow_path": ".github/workflows/build-dbt-oss-musllinux.yml"
+      },
+      "statement": "SLSA provenance verifies with the signer workflow, an allowed source ref and the build commit, and records the same workflow path, repository, ref and commit.",
+      "status": "enforced",
+      "title": "Build provenance from the pinned workflow"
+    },
+    {
+      "check": "check_policy_pinned",
+      "id": "BLD-5",
+      "implemented_by": "verify_wheel_policy.py check_policy_pinned",
+      "parameters": {
+        "policy_version": "v1"
+      },
+      "statement": "The attested policy_sha256 equals the sha256 of the published policy.json, and the attested policy_version equals this policy's version.",
+      "status": "enforced",
+      "title": "Built under this exact policy"
+    },
+    {
+      "check": "check_release_assets",
+      "id": "BLD-6",
+      "implemented_by": "verify_wheel_policy.py check_release_assets",
+      "parameters": {
+        "build_log_pattern": "build-log-.+\\.txt\\.gz"
+      },
+      "statement": "The release holds exactly each wheel, its attestation bundle, the attested source archive and one build log.",
+      "status": "enforced",
+      "title": "Release asset set"
+    },
+    {
+      "check": "check_actions_pinned",
+      "id": "BLD-7",
+      "implemented_by": "verify_wheel_policy.py check_actions_pinned",
+      "parameters": {
+        "workflows": [
+          "build-dbt-oss-musllinux.yml",
+          "verify-and-release.yml"
+        ]
+      },
+      "statement": "Every external action used by the build and release workflows is pinned to a full commit SHA.",
+      "status": "enforced",
+      "title": "Workflow actions pinned"
+    },
+    {
+      "check": "check_predicate_complete",
+      "id": "BLD-10",
+      "implemented_by": "verify_wheel_policy.py check_predicate_complete",
+      "parameters": {
+        "required_fields": [
+          "build_script_sha256",
+          "builder_ref",
+          "checkout_verify_sha256",
+          "policy_sha256",
+          "policy_version",
+          "rustc_version",
+          "snapshot_archive_name",
+          "snapshot_archive_sha256",
+          "tree_clean",
+          "upstream_commit",
+          "upstream_repo",
+          "upstream_tag"
+        ]
+      },
+      "statement": "The upstream-source attestation carries exactly the required fields: none missing, none unexpected.",
+      "status": "enforced",
+      "title": "Predicate is complete"
+    },
+    {
+      "check": "check_scripts_at_commit",
+      "id": "BLD-11",
+      "implemented_by": "verify_wheel_policy.py check_scripts_at_commit",
+      "parameters": {
+        "files": {
+          "build_script_sha256": "recipes/dbt-oss/build.sh",
+          "checkout_verify_sha256": ".github/scripts/checkout_verify.py"
+        }
+      },
+      "statement": "The attested sha256 of checkout_verify.py and build.sh equals the sha256 of those files at the build commit.",
+      "status": "enforced",
+      "title": "Build scripts are the committed ones"
+    },
+    {
+      "check": "check_lock_committed",
+      "id": "BLD-12",
+      "implemented_by": "verify_wheel_policy.py check_lock_committed",
+      "parameters": {
+        "lock_path": "builder.lock"
+      },
+      "statement": "The builder.lock used for verification is byte-identical to builder.lock at the build commit.",
+      "status": "enforced",
+      "title": "Builder lock is the committed one"
+    },
+    {
+      "check": "check_release_target",
+      "id": "BLD-13",
+      "implemented_by": "verify_wheel_policy.py check_release_target",
+      "parameters": {},
+      "statement": "The release target is the build commit, and once published the tag ref resolves to that commit.",
+      "status": "enforced",
+      "title": "Release tag pinned to the build commit"
+    },
+    {
+      "evidence": "GitHub-hosted ubuntu runner, GitHub Actions OIDC, Sigstore public-good instance, the cosign binary installed by the pinned installer action.",
+      "id": "BLD-8",
+      "implemented_by": "none, trust root",
+      "statement": "The build runs on a GitHub-hosted runner and signs through GitHub and Sigstore. These are trusted, not verified here.",
+      "status": "declared",
+      "title": "Trust root: runner and signing"
+    },
+    {
+      "evidence": "Alpine APKs, rustup and Rust toolchain archives, crates.io tarballs, and the upstream git dependencies sdf-labs/arrow-rs, sdf-labs/datafusion, sdf-labs/ring, sdf-labs/datafusion-sqlparser-rs, dbt-labs/arrow-adbc, astral-sh/ruff. libgcc_s.so.1 from the builder image is grafted into the wheels.",
+      "id": "BLD-9",
+      "implemented_by": "none, trust root",
+      "statement": "Inputs fetched at build time are trusted, not verified here. The grafted libgcc_s.so.1 is covered by the builder image SBOM.",
+      "status": "declared",
+      "title": "Trust root: packages and sources"
+    }
+  ],
+  "schema": 2,
+  "scope": "wheel-build",
+  "summary": "Wheels are built in a builder image whose digest matches builder.lock, from an unmodified upstream tag, by a pinned workflow on main. Each rule below is verified at release by verify_wheel_policy.py against the attestations on the wheels. Declared rules are trust roots: recorded, not verified."
+}
