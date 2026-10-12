@@ -42,7 +42,7 @@ env:
   # so it's signed as part of the attestation - not just a label here.
   # Kept identical to build-dbt-oss-win-arm64.yml's value since both
   # platforms build the same upstream commit under the same policy today.
-  POLICY_VERSION: v1
+  POLICY_VERSION: v1.2
 
 jobs:
   build:
