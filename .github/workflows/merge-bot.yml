@@ -149,9 +149,13 @@ jobs:
               c=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs?per_page=100" \
                 --jq "[.check_runs[] | select(.name == \"$name\")] | sort_by(.started_at) | last | if . == null or .status != \"completed\" then \"none\" else .conclusion // \"none\" end")
               echo "attempt $i: $name: $c"
-              if [ "$name" = "Analyze (python)" ] && [ "$py_changed" = "0" ] && [ "$c" = "none" ]; then
-                echo "  no .py files changed, python analysis was not scheduled: not required"
-                continue
+              if [ "$name" = "Analyze (actions)" ]; then actions_c="$c"; fi
+              if [ "$name" = "Analyze (python)" ] && [ "$c" = "none" ] && [ "${actions_c:-none}" = "success" ]; then
+                n=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs?per_page=100" --jq '[.check_runs[] | select(.name == "Analyze (python)")] | length')
+                if [ "$n" = "0" ]; then
+                  echo "  Analyze (python) was never scheduled (python not enabled in CodeQL default setup): not required"
+                  continue
+                fi
               fi
               case "$c" in
                 success) ;;
