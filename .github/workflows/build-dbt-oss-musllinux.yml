@@ -41,12 +41,8 @@ permissions:
 
 env:
   UPSTREAM_PREDICATE: https://patrickryankenneth.github.io/attestations/upstream-source/v1
-  # Bump this whenever the checkout/build workflow's own hardening level
-  # changes. Recorded inside upstream-source.json by checkout_verify.py,
-  # so it's signed as part of the attestation - not just a label here.
-  # Kept identical to build-dbt-oss-win-arm64.yml's value since both
-  # platforms build the same upstream commit under the same policy today.
-  POLICY_VERSION: v1.2
+  # POLICY_VERSION is not set here: the build step reads it from
+  # policy/wheel-build/policy.json so it cannot drift from the policy.
 
 jobs:
   build:
@@ -135,6 +131,7 @@ jobs:
       - name: Run build.sh in container
         run: |
           POLICY_SHA256="$(sha256sum policy/wheel-build/policy.json | cut -d' ' -f1)"
+          POLICY_VERSION="$(python3 -c 'import json; print(json.load(open("policy/wheel-build/policy.json"))["policy_version"])')"
           docker run --rm \
             -e BUILDER_REF="$BUILDER_REF" \
             -e POLICY_SHA256="$POLICY_SHA256" \
@@ -144,7 +141,7 @@ jobs:
             -e DBT_OSS_TAG="${DBT_OSS_TAG}" \
             -e PACKAGE_TARGETS="${PACKAGE_TARGETS}" \
             -e COLD_CACHE="${COLD_CACHE}" \
-            -e POLICY_VERSION="${{ env.POLICY_VERSION }}" \
+            -e POLICY_VERSION="$POLICY_VERSION" \
             -v ~/pywheels-cache/cargo-registry:/opt/cargo/registry \
             -v ~/pywheels-cache/cargo-git:/opt/cargo/git \
             -v ~/pywheels-cache/cargo-target:/cargo-target \
