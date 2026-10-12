@@ -12,7 +12,7 @@
     "The post-build tree check is logged by build.sh, not attested.",
     "SBOM and VEX for the wheels are not part of this policy version."
   ],
-  "policy_version": "v1.1",
+  "policy_version": "v1.2",
   "rules": [
     {
       "check": "check_builder_pinned",
@@ -66,7 +66,7 @@
       "id": "BLD-5",
       "implemented_by": "verify_wheel_policy.py check_policy_pinned",
       "parameters": {
-        "policy_version": "v1.1"
+        "policy_version": "v1.2"
       },
       "statement": "The attested policy_sha256 equals the sha256 of the published policy.json, and the attested policy_version equals this policy's version.",
       "status": "enforced",

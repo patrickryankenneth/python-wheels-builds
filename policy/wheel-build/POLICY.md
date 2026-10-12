@@ -1,4 +1,4 @@
-# Policy wheel-build v1.1
+# Policy wheel-build v1.2
 
 <!-- Generated from policy.json by policy_tool.py render-md. Do not edit. -->
 
@@ -89,7 +89,7 @@ Parameters:
 
 ```json
 {
-  "policy_version": "v1.1"
+  "policy_version": "v1.2"
 }
 ```
 
