@@ -94,21 +94,13 @@ jobs:
             exit 1
           fi
 
-      - name: Verify tag gitsign signature against pinned identity (enforced only)
+      - name: Verify tag is GitHub-verified (enforced only)
         if: env.MODE == 'enforced'
         run: |
           set -euo pipefail
-          if [ -z "${SIGNER_IDENTITY:-}" ] || [ -z "${SIGNER_ISSUER:-}" ]; then
-            echo "::error::set repository variables POLICY_SIGNER_IDENTITY and POLICY_SIGNER_ISSUER (Settings -> Secrets and variables -> Actions -> Variables)"
-            exit 1
-          fi
-          # Go is preinstalled on ubuntu-latest runners.
-          go install "github.com/sigstore/gitsign@${GITSIGN_REF}"
-          export PATH="$(go env GOPATH)/bin:$PATH"
-          gitsign verify-tag \
-            --certificate-identity "$SIGNER_IDENTITY" \
-            --certificate-oidc-issuer "$SIGNER_ISSUER" \
-            "${TAG}"
+          sha="$(git rev-parse "refs/tags/${TAG}")"
+          res="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${sha}" --jq '"\(.verification.verified) \(.verification.reason)"')"
+          [ "$res" = "true valid" ] || { echo "::error::tag ${TAG} not verified: ${res}"; exit 1; }
 
   draft:
     needs: check
