@@ -12,7 +12,7 @@
     "The post-build tree check is logged by build.sh, not attested.",
     "SBOM and VEX for the wheels are not part of this policy version."
   ],
-  "policy_version": "v1.2",
+  "policy_version": "v1.3",
   "rules": [
     {
       "check": "check_builder_pinned",
@@ -66,7 +66,7 @@
       "id": "BLD-5",
       "implemented_by": "verify_wheel_policy.py check_policy_pinned",
       "parameters": {
-        "policy_version": "v1.2"
+        "policy_version": "v1.3"
       },
       "statement": "The attested policy_sha256 equals the sha256 of the published policy.json, and the attested policy_version equals this policy's version.",
       "status": "enforced",
@@ -154,6 +154,18 @@
       "statement": "The release target is the build commit, and once published the tag ref resolves to that commit.",
       "status": "enforced",
       "title": "Release tag pinned to the build commit"
+    },
+    {
+      "check": "check_release_manifest",
+      "id": "BLD-14",
+      "implemented_by": "verify_wheel_policy.py check_release_manifest",
+      "parameters": {
+        "signer_identity": "patrickryankenneth@gmail.com",
+        "signer_issuer": "https://github.com/login/oauth"
+      },
+      "statement": "Once published, the release holds SHA256SUMS and SHA256SUMS.sigstore.json, the bundle verifies for the pinned maintainer OIDC identity and issuer, and the manifest lists exactly every other asset with a matching sha256. While the release is still a draft this rule passes, because signing happens after verification.",
+      "status": "enforced",
+      "title": "Release manifest signed by the maintainer"
     },
     {
       "evidence": "GitHub-hosted ubuntu runner, GitHub Actions OIDC, Sigstore public-good instance, the cosign binary installed by the pinned installer action.",

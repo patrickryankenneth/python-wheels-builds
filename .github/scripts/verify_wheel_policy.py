@@ -240,13 +240,69 @@ def check_release_assets(ctx, params):
     if len(archives) != 1:
         errs.append(f"wheels disagree on the source archive: {sorted(archives)}")
     expected |= archives
-    names = {p.name for p in ctx.assets.iterdir()}
+    names = {p.name for p in ctx.assets.iterdir()} - {"SHA256SUMS", "SHA256SUMS.sigstore.json"}
     logs = {n for n in names if re.fullmatch(params["build_log_pattern"], n)}
     if len(logs) != 1:
         errs.append(f"expected exactly one build log, found {sorted(logs)}")
     got = names - logs
     if got != expected:
         errs.append(f"asset set mismatch: missing {sorted(expected - got)}, unexpected {sorted(got - expected)}")
+    return errs
+
+
+MANIFEST = "SHA256SUMS"
+MANIFEST_BUNDLE = "SHA256SUMS.sigstore.json"
+
+
+def _release_is_draft(ctx):
+    rc, out = ctx.run(["gh", "api", f"repos/{ctx.repo}/releases?per_page=100", "--paginate",
+                       "--jq", f'.[] | select(.tag_name=="{ctx.release_tag}") | .draft'])
+    vals = out.split()
+    if rc != 0 or not vals:
+        return None
+    return vals[0] == "true"
+
+
+def check_release_manifest(ctx, params):
+    if ctx.assets is None:
+        return ["assets dir not provided"]
+    if not ctx.release_tag:
+        return ["--release-tag is required"]
+    draft = _release_is_draft(ctx)
+    if draft is None:
+        return [f"cannot determine whether release {ctx.release_tag} is a draft"]
+    if draft:
+        return []  # signing happens after draft verification; enforced once published
+    man, bun = ctx.assets / MANIFEST, ctx.assets / MANIFEST_BUNDLE
+    errs = [f"missing {p.name}" for p in (man, bun) if not p.is_file()]
+    if errs:
+        return errs
+    r = subprocess.run(["cosign", "verify-blob", "--bundle", str(bun),
+                        "--certificate-identity", params["signer_identity"],
+                        "--certificate-oidc-issuer", params["signer_issuer"], str(man)],
+                       text=True, capture_output=True)
+    if r.returncode != 0:
+        return [f"cosign verify-blob failed: {r.stderr.strip()[-300:]}"]
+    listed = {}
+    for ln in man.read_text().splitlines():
+        if not ln.strip():
+            continue
+        h, _, n = ln.partition(" ")
+        n = n.lstrip(" *")
+        if n in listed:
+            errs.append(f"{n} listed twice in {MANIFEST}")
+        listed[n] = h
+    actual = {p.name for p in ctx.assets.iterdir() if p.is_file()} - {MANIFEST, MANIFEST_BUNDLE}
+    if set(listed) != actual:
+        errs.append(f"manifest/asset mismatch: not in manifest {sorted(actual - set(listed))}, "
+                    f"not in release {sorted(set(listed) - actual)}")
+    for n in sorted(set(listed) & actual):
+        h = hashlib.sha256()
+        with open(ctx.assets / n, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        if h.hexdigest() != listed[n]:
+            errs.append(f"{n}: sha256 does not match {MANIFEST}")
     return errs
 
 

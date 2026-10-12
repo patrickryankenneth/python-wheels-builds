@@ -5,7 +5,11 @@ on:
     paths:
       - "policy/**"
       - ".github/scripts/**"
+      - ".github/workflows/verify-and-release.yml"
       - "tests/**"
+  # push is deliberately unfiltered: release-policy requires a green run on the exact main commit
+  push:
+    branches: [main, dev]
 
 permissions:
   contents: read
@@ -31,5 +35,17 @@ jobs:
           python3 .github/scripts/policy_tool_v2.py $P lint
           python3 .github/scripts/policy_tool_v2.py $P check-md
 
-      - name: Test verifier
-        run: python3 -m pytest tests/test_verify_wheel_policy.py -q
+      - name: verify-and-release.yml pins match policy.json
+        run: |
+          set -euo pipefail
+          P="--policy policy/wheel-build/policy.json --md policy/wheel-build/POLICY.md --verifier .github/scripts/verify_wheel_policy.py"
+          F=.github/workflows/verify-and-release.yml
+          want_sha="$(grep -oP '^\s*POLICY_SHA256:\s*\K[0-9a-f]{64}' "$F")"
+          have_sha="$(sha256sum policy/wheel-build/policy.json | cut -d' ' -f1)"
+          want_tag="$(grep -oP '^\s*POLICY_TAG:\s*\K\S+' "$F")"
+          have_tag="$(python3 .github/scripts/policy_tool_v2.py $P tag)"
+          [ "$want_sha" = "$have_sha" ] || { echo "::error::POLICY_SHA256 $want_sha != policy.json $have_sha"; exit 1; }
+          [ "$want_tag" = "$have_tag" ] || { echo "::error::POLICY_TAG $want_tag != $have_tag"; exit 1; }
+
+      - name: Tests
+        run: python3 -m pytest tests -q

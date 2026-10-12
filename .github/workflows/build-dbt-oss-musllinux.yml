@@ -20,9 +20,13 @@ on:
         type: boolean
         default: false
       dry_run:
-        description: "Verify the whole release end-to-end, then delete the draft instead of publishing. Leave OFF to publish for real."
+        description: "Verify the whole release end-to-end, then delete the draft instead of publishing."
         type: boolean
         default: false
+      draft_only:
+        description: "Leave the verified release as an unpublished DRAFT for workstation signing (default). Turn OFF only to publish from CI."
+        type: boolean
+        default: true
 
 # packages: read is belt-and-suspenders: the image is public so pulling
 # doesn't strictly require it, but a newly-published package on GHCR
@@ -46,8 +50,18 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: build (${{ matrix.arch }})
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     env:
+      ARCH: ${{ matrix.arch }}
       DBT_OSS_TAG: ${{ inputs.dbt_oss_tag || 'v2.0.5' }}
       PACKAGE_TARGETS: ${{ inputs.package_targets || 'both' }}
       # Release dispatches never use caches and fetch deps with --locked;
@@ -70,9 +84,9 @@ jobs:
             ~/pywheels-cache/cargo-git
             ~/pywheels-cache/cargo-target
             ~/pywheels-cache/sccache
-          key: pywheels-musllinux-${{ hashFiles('builder.lock') }}-${{ env.DBT_OSS_TAG }}
+          key: pywheels-musllinux-${{ matrix.arch }}-${{ hashFiles('builder.lock') }}-${{ env.DBT_OSS_TAG }}
           restore-keys: |
-            pywheels-musllinux-${{ hashFiles('builder.lock') }}-
+            pywheels-musllinux-${{ matrix.arch }}-${{ hashFiles('builder.lock') }}-
 
       - name: Prepare cache dirs
         run: |
@@ -97,7 +111,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          OUT=$(./verify-builder.sh x86_64 | tee /dev/stderr)
+          OUT=$(./verify-builder.sh "$ARCH" | tee /dev/stderr)
           REF=$(printf '%s\n' "$OUT" | tail -n1)
           case "$REF" in
             "${IMAGE}@sha256:"*) ;;
@@ -172,14 +186,14 @@ jobs:
       - name: Upload wheels
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: dbt-wheels-musllinux-${{ env.DBT_OSS_TAG }}
+          name: dbt-wheels-musllinux-${{ env.DBT_OSS_TAG }}-${{ env.ARCH }}
           path: recipes/dbt-oss/dist/**/*.whl
           if-no-files-found: error
 
       - name: Upload source archive
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: dbt-source-archive-musllinux-${{ env.DBT_OSS_TAG }}
+          name: dbt-source-archive-musllinux-${{ env.DBT_OSS_TAG }}-${{ env.ARCH }}
           path: recipes/dbt-oss/source-archive/*.tar.gz
           if-no-files-found: error
 
@@ -187,7 +201,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: build-logs-${{ env.DBT_OSS_TAG }}
+          name: build-logs-${{ env.DBT_OSS_TAG }}-${{ env.ARCH }}
           path: recipes/dbt-oss/build-logs/*.log
           if-no-files-found: ignore
 
@@ -195,7 +209,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: cargo-timings-${{ env.DBT_OSS_TAG }}
+          name: cargo-timings-${{ env.DBT_OSS_TAG }}-${{ env.ARCH }}
           path: ~/pywheels-cache/cargo-target/cargo-timings/*.html
           if-no-files-found: ignore
 
@@ -249,8 +263,9 @@ jobs:
     with:
       upstream_sha: ${{ needs.build.outputs.upstream_sha }}
       upstream_tag: ${{ needs.build.outputs.tag }}
-      wheel_artifact_name: dbt-wheels-musllinux-${{ needs.build.outputs.tag }}
-      source_archive_artifact_name: dbt-source-archive-musllinux-${{ needs.build.outputs.tag }}
+      wheel_artifact_name: dbt-wheels-musllinux-${{ needs.build.outputs.tag }}-*
+      source_archive_artifact_name: dbt-source-archive-musllinux-${{ needs.build.outputs.tag }}-*
       signer_workflow: ${{ github.repository }}/.github/workflows/build-dbt-oss-musllinux.yml
       dry_run: ${{ inputs.dry_run }}
+      draft_only: ${{ inputs.draft_only }}
       force_new_post: ${{ inputs.force_new_post || false }}

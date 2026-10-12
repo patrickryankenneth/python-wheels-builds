@@ -205,7 +205,7 @@ def fetch_build_job_log(repo: str, run_id: str, job_name: str, tag: str, assets_
 
 def release_transaction(repo: str, rel: str, sha: str, tag: str, title_prefix: str,
                          assets_dir: Path, signer_workflow: str, dry_run: bool,
-                         build_sha: str, upstream_tag: str | None = None,
+                         build_sha: str, draft_only: bool = False, upstream_tag: str | None = None,
                          verify_cmd: str | None = None) -> str | None:
     """
     Draft -> upload -> verify asset set -> (publish | delete). Same code
@@ -296,6 +296,17 @@ def release_transaction(repo: str, rel: str, sha: str, tag: str, title_prefix: s
         run_cmd(["gh", "release", "delete", rel, "--repo", repo, "--yes"], check=False)
         return None
 
+    if draft_only:
+        # Same contract as the builder repo: the workflow never publishes.
+        # The maintainer signs SHA256SUMS on the workstation (sign-release.sh),
+        # which uploads the bundle and publishes. A rerun resumes this draft.
+        print(f"Draft {rel} verified and left UNPUBLISHED - sign and publish from the workstation")
+        summary = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary:
+            with open(summary, "a") as f:
+                f.write(f"### Draft {rel} created - NOT published\n")
+        return None
+
     run_cmd(["gh", "release", "edit", rel, "--repo", repo, "--draft=false"])
     url = json.loads(run_cmd(["gh", "release", "view", rel, "--repo", repo, "--json", "url"]).stdout)["url"]
     print(f"Published {rel} -> {url}")
@@ -327,6 +338,8 @@ def main() -> None:
                     help="Commit the release tag must point at (the commit the wheels were built from). "
                          "Default: $GITHUB_SHA")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--draft-only", action="store_true",
+                    help="Verify, then leave the release as a draft. Never publishes (a human signs and publishes).")
     p.add_argument("--verify-cmd", default=None,
                     help="Command run after upload and target checks, before publish/delete. {release_tag} is substituted")
     p.add_argument("--force-new-post", action="store_true",
@@ -361,7 +374,8 @@ def main() -> None:
 
     url = release_transaction(args.repo, rel, args.sha, tag, args.release_title_prefix,
                                 assets_dir, args.signer_workflow, args.dry_run,
-                                build_sha=build_sha, upstream_tag=args.upstream_tag,
+                                build_sha=build_sha, draft_only=args.draft_only,
+                                upstream_tag=args.upstream_tag,
                                 verify_cmd=args.verify_cmd)
     write_outputs(tag, url)
 

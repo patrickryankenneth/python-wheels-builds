@@ -1,4 +1,4 @@
-# Policy wheel-build v1.2
+# Policy wheel-build v1.3
 
 <!-- Generated from policy.json by policy_tool.py render-md. Do not edit. -->
 
@@ -89,7 +89,7 @@ Parameters:
 
 ```json
 {
-  "policy_version": "v1.2"
+  "policy_version": "v1.3"
 }
 ```
 
@@ -199,6 +199,23 @@ Parameters:
 - Implemented by: verify_wheel_policy.py check_release_target
 
 The release target is the build commit, and once published the tag ref resolves to that commit.
+
+### BLD-14 - Release manifest signed by the maintainer
+
+- Status: `enforced`
+- Check: `check_release_manifest`
+- Implemented by: verify_wheel_policy.py check_release_manifest
+
+Once published, the release holds SHA256SUMS and SHA256SUMS.sigstore.json, the bundle verifies for the pinned maintainer OIDC identity and issuer, and the manifest lists exactly every other asset with a matching sha256. While the release is still a draft this rule passes, because signing happens after verification.
+
+Parameters:
+
+```json
+{
+  "signer_identity": "patrickryankenneth@gmail.com",
+  "signer_issuer": "https://github.com/login/oauth"
+}
+```
 
 ### BLD-8 - Trust root: runner and signing
 

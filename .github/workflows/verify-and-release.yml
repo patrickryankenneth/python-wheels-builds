@@ -46,6 +46,10 @@ on:
         description: "If true, verify everything end-to-end then delete the draft instead of publishing"
         default: false
         type: boolean
+      draft_only:
+        description: "If true (default), verify then leave the release as an unpublished draft; the maintainer signs SHA256SUMS and publishes. Set false only to publish from CI."
+        default: true
+        type: boolean
     outputs:
       release_url:
         description: "URL of the published release (empty in dry-run mode)"
@@ -56,6 +60,9 @@ on:
 
 env:
   POLICY_VERSION: 2026-09-sha-pinned-v1
+  # Pinned here so the release cannot vouch for itself; policy-ci fails if these drift from policy.json.
+  POLICY_TAG: policy-wheel-build-v1.3
+  POLICY_SHA256: ef1ccc65a0a6cecece5b36b784fb462cd205f077271038d51a48fd57fa10e9b4
 
 jobs:
   release:
@@ -84,21 +91,24 @@ jobs:
       - name: Download wheel artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: ${{ inputs.wheel_artifact_name }}
+          pattern: ${{ inputs.wheel_artifact_name }}
+          merge-multiple: true
           path: dist
 
       - name: Download source archive artifact into release assets
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: ${{ inputs.source_archive_artifact_name }}
+          pattern: ${{ inputs.source_archive_artifact_name }}
+          merge-multiple: true
           path: release-assets
 
       - name: Fetch published wheel-build policy
         run: |
           set -euo pipefail
-          gh release download policy-wheel-build-v1.2 --repo "${{ github.repository }}" --dir policy-published \
+          gh release download "$POLICY_TAG" --repo "${{ github.repository }}" --dir policy-published \
             --pattern policy.json --pattern policy.json.sha256
           (cd policy-published && sha256sum -c policy.json.sha256)
+          echo "${POLICY_SHA256}  policy-published/policy.json" | sha256sum -c -
 
       - name: Run release manager
         id: run
@@ -113,4 +123,5 @@ jobs:
             ${{ inputs.tag && format('--tag {0}', inputs.tag) || '' }} \
             ${{ inputs.force_new_post && '--force-new-post' || '' }} \
             --verify-cmd "python3 .github/scripts/verify_wheel_policy.py --policy policy-published/policy.json --root . --wheel-dir dist --assets-dir release-assets --lock builder.lock --repo ${{ github.repository }} --signer-workflow ${{ inputs.signer_workflow }} --source-ref ${{ github.ref }} --build-sha ${{ github.sha }} --upstream-tag ${{ inputs.upstream_tag }} --release-tag {release_tag}" \
-            ${{ inputs.dry_run && '--dry-run' || '' }}
+            ${{ inputs.dry_run && '--dry-run' || '' }} \
+            ${{ inputs.draft_only && '--draft-only' || '' }}
