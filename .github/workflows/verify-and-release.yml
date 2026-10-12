@@ -96,7 +96,7 @@ jobs:
       - name: Fetch published wheel-build policy
         run: |
           set -euo pipefail
-          gh release download policy-wheel-build-v1 --repo "${{ github.repository }}" --dir policy-published \
+          gh release download policy-wheel-build-v1.1 --repo "${{ github.repository }}" --dir policy-published \
             --pattern policy.json --pattern policy.json.sha256
           (cd policy-published && sha256sum -c policy.json.sha256)
 
