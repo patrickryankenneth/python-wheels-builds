@@ -187,20 +187,31 @@ def fetch_build_job_log(repo: str, run_id: str, job_name: str, tag: str, assets_
     this job only runs after `needs: build` (or equivalent) finishes, so
     the log is already complete and fetchable, not read mid-run."""
     assets_dir.mkdir(parents=True, exist_ok=True)
-    data = run_cmd_json(["gh", "api", f"repos/{repo}/actions/runs/{run_id}/jobs"])
-    job_id = next((j["id"] for j in data.get("jobs", []) if j["name"] == job_name), None)
-    if job_id is None:
+    data = run_cmd_json(["gh", "api", f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100"])
+    # A matrix build names its jobs "build (x86_64)", "build (aarch64)", ...
+    # so match the exact name or "<name> (" as a prefix.
+    jobs = sorted((j for j in data.get("jobs", [])
+                   if j["name"] == job_name or j["name"].startswith(f"{job_name} (")),
+                  key=lambda j: j["name"])
+    if not jobs:
         print(f"::error::could not find a job named '{job_name}' in this run")
         sys.exit(1)
+    bad = [j["name"] for j in jobs if j.get("conclusion") != "success"]
+    if bad:
+        print(f"::error::build job(s) did not succeed: {bad}")
+        sys.exit(1)
 
-    result = run_cmd(["gh", "api", f"repos/{repo}/actions/jobs/{job_id}/logs", "--allow-escape-sequences"])
+    parts = []
+    for j in jobs:
+        res = run_cmd(["gh", "api", f"repos/{repo}/actions/jobs/{j['id']}/logs", "--allow-escape-sequences"])
+        parts.append(f"===== job: {j['name']} (id {j['id']}) =====\n{res.stdout}\n")
     txt_path = assets_dir / f"build-log-{tag}.txt"
-    txt_path.write_text(result.stdout)
+    txt_path.write_text("".join(parts))
     gz_path = Path(f"{txt_path}.gz")
     with txt_path.open("rb") as f_in, gzip.open(gz_path, "wb", compresslevel=9) as f_out:
         shutil.copyfileobj(f_in, f_out)
     txt_path.unlink()
-    print(f"Saved build log for job {job_id} -> {gz_path.name}")
+    print(f"Saved build log for {len(jobs)} job(s) -> {gz_path.name}")
 
 
 def release_transaction(repo: str, rel: str, sha: str, tag: str, title_prefix: str,
