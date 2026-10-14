@@ -387,7 +387,24 @@ def check_release_target(ctx, params):
             except (ValueError, KeyError):
                 errs.append("tag ref output malformed")
             else:
-                if obj.get("type") != "commit" or obj.get("sha") != ctx.build_sha:
+                if obj.get("type") == "tag":
+                    # Annotated tag: follow it to the commit and require GitHub to
+                    # report its signature as verified.
+                    rc, out = ctx.run(["gh", "api", f"repos/{ctx.repo}/git/tags/{obj.get('sha')}"])
+                    if rc != 0:
+                        errs.append(f"cannot read annotated tag object {obj.get('sha')!r}")
+                    else:
+                        try:
+                            t = json.loads(out)
+                            target, ver = t["object"], t.get("verification") or {}
+                        except (ValueError, KeyError):
+                            errs.append("annotated tag object malformed")
+                        else:
+                            if target.get("type") != "commit" or target.get("sha") != ctx.build_sha:
+                                errs.append(f"annotated tag {ctx.release_tag} points at {target.get('sha')!r}, not {ctx.build_sha}")
+                            if ver.get("verified") is not True:
+                                errs.append(f"annotated tag {ctx.release_tag} is not verified by GitHub (reason: {ver.get('reason')!r})")
+                elif obj.get("type") != "commit" or obj.get("sha") != ctx.build_sha:
                     errs.append(f"tag {ctx.release_tag} points at {obj.get('sha')!r}, not {ctx.build_sha}")
     return errs
 
