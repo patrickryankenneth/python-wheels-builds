@@ -1,0 +1,58 @@
+name: open-pr-dev-to-main
+
+on:
+  push:
+    branches: [dev]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: open-pr-dev-to-main
+  cancel-in-progress: true
+
+jobs:
+  pr:
+    runs-on: ubuntu-latest
+    environment: submit-pull-request
+    steps:
+      - name: App token
+        id: app
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.PR_BOT_APP_ID }}
+          private-key: ${{ secrets.PR_BOT_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-pull-requests: write
+          permission-contents: read
+
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Create or update PR
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          set -euo pipefail
+          git fetch origin main dev
+          N=$(git rev-list --count origin/main..origin/dev)
+          [ "$N" -gt 0 ] || { echo "dev is level with main; nothing to open"; exit 0; }
+          FIRST=$(git log -1 --format=%s origin/dev)
+          if [ "$N" -eq 1 ]; then
+            TITLE="$FIRST"
+          else
+            TITLE="dev to main: $FIRST (+$((N-1)) more)"
+          fi
+          {
+            echo "## $N commit(s) ahead of main"
+            echo
+            git log --reverse --format='### %s%n%n%b%n(%h)%n' origin/main..origin/dev
+          } | head -c 60000 > body.md
+          NUM=$(gh pr list --base main --head dev --state open --json number --jq '.[0].number // empty')
+          if [ -n "$NUM" ]; then
+            gh pr edit "$NUM" --title "$TITLE" --body-file body.md
+          else
+            gh pr create --base main --head dev --title "$TITLE" --body-file body.md
+          fi
